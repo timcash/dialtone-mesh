@@ -208,8 +208,17 @@ func runLint(paths Paths, _ []string) error {
 func runBuild(paths Paths, args []string) error {
 	fs := flag.NewFlagSet("mesh-build", flag.ContinueOnError)
 	arch := fs.String("arch", "host", "host|x86_64|arm64|all")
+	host := fs.String("host", "local", "Target host: local, mesh node, or all")
+	repoDir := fs.String("repo-dir", "", "Remote repo dir override")
+	skipSelf := fs.Bool("skip-self", true, "When --host all, skip current local mesh node")
+	withInstall := fs.Bool("with-install", false, "Run mesh install before build on target")
+	dryRun := fs.Bool("dry-run", false, "Print remote commands without executing")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	target := strings.ToLower(strings.TrimSpace(*host))
+	if target != "" && target != "local" {
+		return runBuildRemote(paths, target, strings.TrimSpace(*arch), strings.TrimSpace(*repoDir), *skipSelf, *withInstall, *dryRun)
 	}
 	if err := os.MkdirAll(paths.BinDir, 0o755); err != nil {
 		return err
@@ -235,6 +244,55 @@ func runBuild(paths Paths, args []string) error {
 		}
 	}
 	return nil
+}
+
+func runBuildRemote(paths Paths, host, arch, repoDir string, skipSelf, withInstall, dryRun bool) error {
+	runNode := func(node sshv1.MeshNode) error {
+		if skipSelf && host == "all" && isSelfMeshNode(node) {
+			logs.Raw("== %s ==\nSKIP self node", node.Name)
+			return nil
+		}
+		rd := strings.TrimSpace(repoDir)
+		if rd == "" {
+			rd = defaultRepoDirForNode(node)
+		}
+		parts := []string{"set -e", "cd " + shellQuote(rd)}
+		if withInstall {
+			parts = append(parts, "./dialtone.sh mesh v1 install --skip-apt")
+		}
+		parts = append(parts, "./dialtone.sh mesh v1 build --host local --arch "+shellQuote(arch))
+		cmd := strings.Join(parts, " && ")
+		logs.Raw("== %s ==", node.Name)
+		if dryRun {
+			logs.Raw("[DRY-RUN] %s", cmd)
+			return nil
+		}
+		out, err := sshv1.RunNodeCommand(node.Name, cmd, sshv1.CommandOptions{})
+		if strings.TrimSpace(out) != "" {
+			logs.Raw("%s", strings.TrimRight(out, "\n"))
+		}
+		return err
+	}
+
+	if host == "all" {
+		failed := 0
+		for _, n := range sshv1.ListMeshNodes() {
+			if err := runNode(n); err != nil {
+				failed++
+				logs.Raw("ERROR: %v", err)
+			}
+		}
+		if failed > 0 {
+			return fmt.Errorf("build finished with %d host failures", failed)
+		}
+		return nil
+	}
+
+	node, err := sshv1.ResolveMeshNode(host)
+	if err != nil {
+		return err
+	}
+	return runNode(node)
 }
 
 func runTest(paths Paths, args []string) error {
@@ -583,10 +641,11 @@ func buildAMD64(paths Paths) error {
 		paths.SourceC,
 		"-O2", "-Wall", "-Wextra",
 		"-I" + filepath.Join(paths.LibudxDir, "include"),
+		"-I" + filepath.Join(paths.LibudxDir, "build", "_deps", "github+libuv+libuv-src", "include"),
 		udxLib, uvLib,
 	}
 	if runtime.GOOS == "linux" {
-		args = append(args, "-static", "-lpthread", "-ldl", "-lrt", "-lm")
+		args = append(args, "-pthread", "-ldl", "-lrt", "-lm")
 	} else {
 		args = append(args, "-lpthread", "-ldl", "-lm")
 	}
@@ -625,8 +684,9 @@ func buildARM64(paths Paths) error {
 		paths.SourceC,
 		"-O2", "-Wall", "-Wextra",
 		"-I" + filepath.Join(paths.LibudxDir, "include"),
+		"-I" + filepath.Join(paths.LibudxDir, "build-arm64-local", "_deps", "github+libuv+libuv-src", "include"),
 		udxLib, uvLib,
-		"-static", "-lpthread", "-ldl", "-lrt", "-lm",
+		"-pthread", "-ldl", "-lrt", "-lm",
 		"-o", paths.BinARM64,
 	}
 	return runCmd(paths.VersionDir, "aarch64-linux-gnu-gcc", args...)
