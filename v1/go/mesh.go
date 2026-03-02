@@ -1,6 +1,7 @@
 package meshv1
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	configv1 "dialtone/dev/plugins/config/src_v1/go"
 	logs "dialtone/dev/plugins/logs/src_v1/go"
@@ -56,8 +58,16 @@ func Run(args []string) error {
 		return nil
 	case "install":
 		return runInstall(paths, rest)
+	case "format":
+		return runFormat(paths, rest)
+	case "lint":
+		return runLint(paths, rest)
 	case "build":
 		return runBuild(paths, rest)
+	case "test":
+		return runTest(paths, rest)
+	case "deploy":
+		return runDeploy(paths, rest)
 	case "start":
 		return runStart(paths, rest)
 	case "join":
@@ -102,8 +112,17 @@ func printUsage() {
 	logs.Raw("Commands:")
 	logs.Raw("  install [--skip-apt] [--with-arm64=true|false]")
 	logs.Raw("          Install mesh/libudx build dependencies")
+	logs.Raw("  format")
+	logs.Raw("          Format Go sources for mesh v1")
+	logs.Raw("  lint")
+	logs.Raw("          Run static checks for mesh v1")
 	logs.Raw("  build [--arch host|x86_64|arm64|all]")
 	logs.Raw("          Build mesh C binary linked to libudx")
+	logs.Raw("  test [--mode local|all]")
+	logs.Raw("          Run mesh self-tests")
+	logs.Raw("  deploy [--host <name|all|local>] [--with-install] [--dry-run]")
+	logs.Raw("         [--bind-ip 0.0.0.0] [--bind-port 19001] [--peer-ip IP] [--peer-port P] [--no-send=true|false]")
+	logs.Raw("          Deploy/start mesh on target host(s)")
 	logs.Raw("  start [--bind-ip 0.0.0.0] [--bind-port 19001] [--peer-ip IP] [--peer-port P]")
 	logs.Raw("        [--no-send=true|false] [--count N] [--interval-ms N] [--exit-after-ms N] [--foreground]")
 	logs.Raw("          Start local mesh runtime (default: background)")
@@ -122,7 +141,7 @@ func resolvePaths(start string) (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	versionDir := filepath.Join(rt.SrcRoot, "plugins", "mesh", "v1")
+	versionDir := filepath.Join(rt.SrcRoot, "mods", "mesh", "v1")
 	binDir := filepath.Join(versionDir, "bin")
 	return Paths{
 		Runtime:    rt,
@@ -178,6 +197,14 @@ func runInstall(paths Paths, args []string) error {
 	return nil
 }
 
+func runFormat(paths Paths, _ []string) error {
+	return runCmd(paths.VersionDir, "gofmt", "-w", filepath.Join(paths.VersionDir, "go", "mesh.go"))
+}
+
+func runLint(paths Paths, _ []string) error {
+	return runCmd(paths.Runtime.SrcRoot, goBin(paths.Runtime), "vet", "./mods/mesh/v1/go")
+}
+
 func runBuild(paths Paths, args []string) error {
 	fs := flag.NewFlagSet("mesh-build", flag.ContinueOnError)
 	arch := fs.String("arch", "host", "host|x86_64|arm64|all")
@@ -208,6 +235,117 @@ func runBuild(paths Paths, args []string) error {
 		}
 	}
 	return nil
+}
+
+func runTest(paths Paths, args []string) error {
+	fs := flag.NewFlagSet("mesh-test", flag.ContinueOnError)
+	mode := fs.String("mode", "all", "local|all")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(*mode)) {
+	case "local", "all":
+		if _, err := ensureHostBinary(paths); err != nil {
+			return err
+		}
+		bin := paths.BinAMD64
+		if runtime.GOARCH == "arm64" {
+			bin = paths.BinARM64
+		}
+		return runLocalSelfTest(bin)
+	default:
+		return fmt.Errorf("unsupported test mode %s (expected local|all)", *mode)
+	}
+}
+
+func runDeploy(paths Paths, args []string) error {
+	fs := flag.NewFlagSet("mesh-deploy", flag.ContinueOnError)
+	host := fs.String("host", "all", "Target host: local, mesh node, or all")
+	repoDir := fs.String("repo-dir", "", "Remote repo dir override")
+	skipSelf := fs.Bool("skip-self", true, "When --host all, skip current local mesh node")
+	withInstall := fs.Bool("with-install", false, "Run mesh install before build/start")
+	dryRun := fs.Bool("dry-run", false, "Print remote commands without executing")
+	bindIP := fs.String("bind-ip", "0.0.0.0", "Local bind IP")
+	bindPort := fs.Int("bind-port", 19001, "Local bind UDP port")
+	peerIP := fs.String("peer-ip", "", "Peer IP")
+	peerPort := fs.Int("peer-port", 0, "Peer port")
+	noSend := fs.Bool("no-send", true, "Run in receive/listen mode")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	target := strings.ToLower(strings.TrimSpace(*host))
+	if target == "" || target == "local" {
+		localArgs := []string{
+			"--bind-ip", strings.TrimSpace(*bindIP),
+			"--bind-port", strconv.Itoa(*bindPort),
+			fmt.Sprintf("--no-send=%t", *noSend),
+		}
+		if strings.TrimSpace(*peerIP) != "" {
+			localArgs = append(localArgs, "--peer-ip", strings.TrimSpace(*peerIP), "--peer-port", strconv.Itoa(*peerPort))
+		}
+		if *withInstall {
+			if err := runInstall(paths, []string{"--skip-apt"}); err != nil {
+				return err
+			}
+		}
+		if err := runBuild(paths, []string{"--arch", "host"}); err != nil {
+			return err
+		}
+		return runStart(paths, localArgs)
+	}
+
+	runNode := func(node sshv1.MeshNode) error {
+		if *skipSelf && target == "all" && isSelfMeshNode(node) {
+			logs.Raw("== %s ==\nSKIP self node", node.Name)
+			return nil
+		}
+		rd := strings.TrimSpace(*repoDir)
+		if rd == "" {
+			rd = defaultRepoDirForNode(node)
+		}
+		startCmd := "./dialtone.sh mesh v1 start --bind-ip " + shellQuote(strings.TrimSpace(*bindIP)) +
+			" --bind-port " + strconv.Itoa(*bindPort) +
+			fmt.Sprintf(" --no-send=%t", *noSend)
+		if strings.TrimSpace(*peerIP) != "" {
+			startCmd += " --peer-ip " + shellQuote(strings.TrimSpace(*peerIP)) + " --peer-port " + strconv.Itoa(*peerPort)
+		}
+		parts := []string{"set -e", "cd " + shellQuote(rd)}
+		if *withInstall {
+			parts = append(parts, "./dialtone.sh mesh v1 install --skip-apt")
+		}
+		parts = append(parts, "./dialtone.sh mesh v1 build --arch host")
+		parts = append(parts, startCmd)
+		cmd := strings.Join(parts, " && ")
+		logs.Raw("== %s ==", node.Name)
+		if *dryRun {
+			logs.Raw("[DRY-RUN] %s", cmd)
+			return nil
+		}
+		out, err := sshv1.RunNodeCommand(node.Name, cmd, sshv1.CommandOptions{})
+		if strings.TrimSpace(out) != "" {
+			logs.Raw("%s", strings.TrimRight(out, "\n"))
+		}
+		return err
+	}
+
+	if target == "all" {
+		failed := 0
+		for _, n := range sshv1.ListMeshNodes() {
+			if err := runNode(n); err != nil {
+				failed++
+				logs.Raw("ERROR: %v", err)
+			}
+		}
+		if failed > 0 {
+			return fmt.Errorf("deploy finished with %d host failures", failed)
+		}
+		return nil
+	}
+	node, err := sshv1.ResolveMeshNode(target)
+	if err != nil {
+		return err
+	}
+	return runNode(node)
 }
 
 func runStart(paths Paths, args []string) error {
@@ -600,4 +738,80 @@ func normalizeHost(v string) string {
 
 func shellQuote(v string) string {
 	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
+}
+
+func goBin(rt configv1.Runtime) string {
+	if strings.TrimSpace(rt.GoBin) != "" {
+		return rt.GoBin
+	}
+	return "go"
+}
+
+func runLocalSelfTest(bin string) error {
+	out, err := runCapture(bin, []string{"--help"}, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(out, "Usage:") {
+		return fmt.Errorf("help output missing Usage")
+	}
+
+	tmp, err := os.MkdirTemp("", "mesh-v1-test-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	receiverLog := filepath.Join(tmp, "receiver.log")
+	senderLog := filepath.Join(tmp, "sender.log")
+	receiverFile, _ := os.Create(receiverLog)
+	defer receiverFile.Close()
+
+	ctxReceiver, cancelReceiver := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancelReceiver()
+	receiver := exec.CommandContext(ctxReceiver, bin,
+		"--bind-ip", "127.0.0.1", "--bind-port", "29002",
+		"--peer-ip", "127.0.0.1", "--peer-port", "29001",
+		"--local-id", "2", "--peer-id", "1",
+		"--no-send", "--exit-after-ms", "2200",
+	)
+	receiver.Stdout = receiverFile
+	receiver.Stderr = receiverFile
+	if err := receiver.Start(); err != nil {
+		return err
+	}
+	time.Sleep(250 * time.Millisecond)
+	if _, err := runCaptureToFile(bin, []string{
+		"--bind-ip", "127.0.0.1", "--bind-port", "29001",
+		"--peer-ip", "127.0.0.1", "--peer-port", "29002",
+		"--local-id", "1", "--peer-id", "2",
+		"--message", "mesh-test-payload", "--count", "2", "--interval-ms", "200",
+		"--exit-after-ms", "1200",
+	}, senderLog, 4*time.Second); err != nil {
+		return err
+	}
+	_ = receiver.Wait()
+
+	recvData, _ := os.ReadFile(receiverLog)
+	if !strings.Contains(string(recvData), "mesh received[") || !strings.Contains(string(recvData), "mesh-test-payload") {
+		return fmt.Errorf("mesh local test failed: receiver did not capture payload")
+	}
+	logs.Info("mesh local self-test passed")
+	return nil
+}
+
+func runCapture(bin string, args []string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func runCaptureToFile(bin string, args []string, file string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	out, err := cmd.CombinedOutput()
+	_ = os.WriteFile(file, out, 0o644)
+	return string(out), err
 }

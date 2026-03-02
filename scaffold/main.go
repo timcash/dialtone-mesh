@@ -3,8 +3,8 @@ package main
 import (
 	"os"
 
+	meshv1 "dialtone/dev/mods/mesh/v1/go"
 	logs "dialtone/dev/plugins/logs/src_v1/go"
-	meshv1 "dialtone/dev/plugins/mesh/v1/go"
 )
 
 func main() {
