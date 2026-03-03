@@ -846,29 +846,50 @@ func buildAMD64(paths Paths) error {
 }
 
 func buildARM64(paths Paths) error {
-	if _, err := exec.LookPath("aarch64-linux-gnu-gcc"); err != nil {
-		return fmt.Errorf("missing aarch64-linux-gnu-gcc (run install first)")
+	cc := "aarch64-linux-gnu-gcc"
+	isDarwin := runtime.GOOS == "darwin" || runtime.GOOS == "macos"
+
+	if isDarwin {
+		cc = "gcc"
+	} else {
+		if _, err := exec.LookPath(cc); err != nil {
+			return fmt.Errorf("missing aarch64-linux-gnu-gcc (run install first)")
+		}
 	}
+
 	buildDir := filepath.Join(paths.LibudxDir, "build-arm64-local")
-	if err := runCmd(paths.VersionDir, "cmake",
-		"-S", paths.LibudxDir,
-		"-B", buildDir,
-		"-G", "Ninja",
-		"-DCMAKE_SYSTEM_NAME=Linux",
-		"-DCMAKE_SYSTEM_PROCESSOR=aarch64",
-		"-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc",
-		"-DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++",
-	); err != nil {
-		return err
+	// On native ARM64, we might already have a 'build' directory from npm install / bare-make
+	if isDarwin && runtime.GOARCH == "arm64" {
+		buildDir = filepath.Join(paths.LibudxDir, "build")
 	}
-	if err := runCmd(paths.VersionDir, "cmake", "--build", buildDir, "-j"); err != nil {
-		return err
+
+	if _, err := os.Stat(buildDir); os.IsNotExist(err) {
+		cmakeArgs := []string{
+			"-S", paths.LibudxDir,
+			"-B", buildDir,
+			"-G", "Ninja",
+		}
+		if !isDarwin || runtime.GOARCH != "arm64" {
+			cmakeArgs = append(cmakeArgs,
+				"-DCMAKE_SYSTEM_NAME=Linux",
+				"-DCMAKE_SYSTEM_PROCESSOR=aarch64",
+				"-DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc",
+				"-DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++",
+			)
+		}
+		if err := runCmd(paths.VersionDir, "cmake", cmakeArgs...); err != nil {
+			return err
+		}
+		if err := runCmd(paths.VersionDir, "cmake", "--build", buildDir, "-j"); err != nil {
+			return err
+		}
 	}
-	udxLib, err := findFile(paths.LibudxDir, "build-arm64-local", "libudx.a")
+
+	udxLib, err := findFile(paths.LibudxDir, filepath.Base(buildDir), "libudx.a")
 	if err != nil {
 		return err
 	}
-	uvLib, err := findFile(paths.LibudxDir, "build-arm64-local", "libuv.a")
+	uvLib, err := findFile(paths.LibudxDir, filepath.Base(buildDir), "libuv.a")
 	if err != nil {
 		return err
 	}
@@ -876,12 +897,16 @@ func buildARM64(paths Paths) error {
 		paths.SourceC,
 		"-Os", "-s", "-Wall", "-Wextra",
 		"-I" + filepath.Join(paths.LibudxDir, "include"),
-		"-I" + filepath.Join(paths.LibudxDir, "build-arm64-local", "_deps", "github+libuv+libuv-src", "include"),
+		"-I" + filepath.Join(buildDir, "_deps", "github+libuv+libuv-src", "include"),
 		udxLib, uvLib,
-		"-pthread", "-ldl", "-lrt", "-lm",
-		"-o", paths.BinARM64,
 	}
-	return runCmd(paths.VersionDir, "aarch64-linux-gnu-gcc", args...)
+	if isDarwin {
+		args = append(args, "-lpthread", "-ldl", "-lm")
+	} else {
+		args = append(args, "-pthread", "-ldl", "-lrt", "-lm")
+	}
+	args = append(args, "-o", paths.BinARM64)
+	return runCmd(paths.VersionDir, cc, args...)
 }
 
 func ensureHostBinary(paths Paths) (string, error) {
