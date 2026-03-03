@@ -264,9 +264,9 @@ func runBuildRemote(paths Paths, host, arch, repoDir string, skipSelf, withInsta
 		}
 		parts := []string{"set -e", "cd " + shellQuote(rd)}
 		if withInstall {
-			parts = append(parts, buildRemoteNixInstallCommand(rd))
+			parts = append(parts, buildRemoteNixInstallCommand(rd, node.OS))
 		}
-		parts = append(parts, buildRemoteNixBuildCommand(rd, arch))
+		parts = append(parts, buildRemoteNixBuildCommand(rd, arch, node.OS))
 		cmd := strings.Join(parts, " && ")
 		logs.Raw("== %s ==", node.Name)
 		if dryRun {
@@ -301,21 +301,23 @@ func runBuildRemote(paths Paths, host, arch, repoDir string, skipSelf, withInsta
 	return runNode(node)
 }
 
-func buildRemoteNixInstallCommand(repoDir string) string {
+func buildRemoteNixInstallCommand(repoDir string, os string) string {
 	inner := strings.Join([]string{
 		"set -e",
 		"cd " + shellQuote(filepath.ToSlash(filepath.Join(repoDir, "src/mods/mesh/v1/libudx"))),
 		"npm install",
 	}, " && ")
-	return strings.Join([]string{
-		"if [ -f \"$HOME/.nix-profile/etc/profile.d/nix.sh\" ]; then . \"$HOME/.nix-profile/etc/profile.d/nix.sh\"; fi",
-		"if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; fi",
-		"command -v nix >/dev/null 2>&1",
-		"nix --extra-experimental-features 'nix-command flakes' develop " + shellQuote("path:"+filepath.ToSlash(repoDir)) + " --command bash -lc " + shellQuote(inner),
-	}, " && ")
+
+	envPrefix := ""
+	if strings.EqualFold(os, "macos") || strings.EqualFold(os, "darwin") {
+		envPrefix = "CGO_ENABLED=0 "
+	}
+
+	return fmt.Sprintf("if [ -x ./dialtone.sh ]; then bash -lc '%s./dialtone.sh mesh v1 install --skip-apt'; else nix --extra-experimental-features 'nix-command flakes' develop --command bash -lc %s; fi",
+		envPrefix, shellQuote(inner))
 }
 
-func buildRemoteNixBuildCommand(repoDir, arch string) string {
+func buildRemoteNixBuildCommand(repoDir, arch string, os string) string {
 	archTarget := strings.ToLower(strings.TrimSpace(arch))
 	if archTarget == "" {
 		archTarget = "host"
@@ -341,12 +343,14 @@ func buildRemoteNixBuildCommand(repoDir, arch string) string {
 		"cc mesh_v1.c -Os -s -Wall -Wextra -Ilibudx/include -Ilibudx/build/_deps/github+libuv+libuv-src/include \"$UDX_LIB\" \"$UV_LIB\" $EXTRA_LIBS -o \"$OUT\"",
 		"echo DIALTONE_MESH_BUILD_OK:$OUT",
 	}, " && ")
-	return strings.Join([]string{
-		"if [ -f \"$HOME/.nix-profile/etc/profile.d/nix.sh\" ]; then . \"$HOME/.nix-profile/etc/profile.d/nix.sh\"; fi",
-		"if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; fi",
-		"command -v nix >/dev/null 2>&1",
-		"nix --extra-experimental-features 'nix-command flakes' develop " + shellQuote("path:"+filepath.ToSlash(repoDir)) + " --command bash -lc " + shellQuote(inner),
-	}, " && ")
+
+	envPrefix := ""
+	if strings.EqualFold(os, "macos") || strings.EqualFold(os, "darwin") {
+		envPrefix = "CGO_ENABLED=0 "
+	}
+
+	return fmt.Sprintf("if [ -x ./dialtone.sh ]; then bash -lc '%s./dialtone.sh mesh v1 build --arch %s --host local'; else nix --extra-experimental-features 'nix-command flakes' develop --command bash -lc %s; fi",
+		envPrefix, archTarget, shellQuote(inner))
 }
 
 func runTest(paths Paths, args []string) error {
@@ -415,17 +419,23 @@ func runDeploy(paths Paths, args []string) error {
 		if rd == "" {
 			rd = defaultRepoDirForNode(node)
 		}
-		startCmd := "./dialtone.sh mesh v1 start --bind-ip " + shellQuote(strings.TrimSpace(*bindIP)) +
+		envPrefix := ""
+		if strings.EqualFold(node.OS, "macos") || strings.EqualFold(node.OS, "darwin") {
+			envPrefix = "CGO_ENABLED=0 "
+		}
+		startCmd := "bash -lc '" + envPrefix + "./dialtone.sh mesh v1 start --bind-ip " + shellQuote(strings.TrimSpace(*bindIP)) +
 			" --bind-port " + strconv.Itoa(*bindPort) +
 			fmt.Sprintf(" --no-send=%t", *noSend)
 		if strings.TrimSpace(*peerIP) != "" {
 			startCmd += " --peer-ip " + shellQuote(strings.TrimSpace(*peerIP)) + " --peer-port " + strconv.Itoa(*peerPort)
 		}
+		startCmd += "'"
+
 		parts := []string{"set -e", "cd " + shellQuote(rd)}
 		if *withInstall {
-			parts = append(parts, "./dialtone.sh mesh v1 install --skip-apt")
+			parts = append(parts, "bash -lc '"+envPrefix+"./dialtone.sh mesh v1 install --skip-apt'")
 		}
-		parts = append(parts, "./dialtone.sh mesh v1 build --arch host")
+		parts = append(parts, "bash -lc '"+envPrefix+"./dialtone.sh mesh v1 build --host local --arch host'")
 		parts = append(parts, startCmd)
 		cmd := strings.Join(parts, " && ")
 		logs.Raw("== %s ==", node.Name)
@@ -704,14 +714,18 @@ func runShellServer(paths Paths, args []string) error {
 		if rd == "" {
 			rd = defaultRepoDirForNode(node)
 		}
+		envPrefix := ""
+		if strings.EqualFold(node.OS, "macos") || strings.EqualFold(node.OS, "darwin") {
+			envPrefix = "CGO_ENABLED=0 "
+		}
 		parts := []string{"set -e", "cd " + shellQuote(rd)}
 		if *withBuild {
-			parts = append(parts, "./dialtone.sh mesh v1 build --host local --arch host")
+			parts = append(parts, "bash -lc '"+envPrefix+"./dialtone.sh mesh v1 build --host local --arch host'")
 		}
-		parts = append(parts, "./dialtone.sh mesh v1 shell-server --host local --bind-ip "+
+		parts = append(parts, "bash -lc '"+envPrefix+"./dialtone.sh mesh v1 shell-server --host local --bind-ip "+
 			shellQuote(strings.TrimSpace(*bindIP))+" --http-port "+strconv.Itoa(*httpPort)+
 			" --script-path "+shellQuote(filepath.ToSlash(filepath.Join(rd, "dialtone.sh")))+
-			" --foreground")
+			" --foreground'")
 		cmd := strings.Join(parts, " && ")
 		logs.Raw("== %s ==", node.Name)
 		if *dryRun {
@@ -754,21 +768,27 @@ func joinRemoteNode(node sshv1.MeshNode, repoDirOverride string, withInstall boo
 	if repoDir == "" {
 		return fmt.Errorf("cannot resolve repo dir for node %s", node.Name)
 	}
-	startCmd := "./dialtone.sh mesh v1 start --bind-ip " + shellQuote(bindIP) +
+	envPrefix := ""
+	if strings.EqualFold(node.OS, "macos") || strings.EqualFold(node.OS, "darwin") {
+		envPrefix = "CGO_ENABLED=0 "
+	}
+
+	startCmd := "bash -lc '" + envPrefix + "./dialtone.sh mesh v1 start --bind-ip " + shellQuote(bindIP) +
 		" --bind-port " + strconv.Itoa(bindPort) +
 		fmt.Sprintf(" --no-send=%t", noSend)
 	if strings.TrimSpace(peerIP) != "" {
 		startCmd += " --peer-ip " + shellQuote(peerIP) + " --peer-port " + strconv.Itoa(peerPort)
 	}
+	startCmd += "'"
 
 	parts := []string{
 		"set -e",
 		"cd " + shellQuote(repoDir),
 	}
 	if withInstall {
-		parts = append(parts, "./dialtone.sh mesh v1 install --skip-apt")
+		parts = append(parts, "bash -lc '"+envPrefix+"./dialtone.sh mesh v1 install --skip-apt'")
 	}
-	parts = append(parts, "./dialtone.sh mesh v1 build --arch host")
+	parts = append(parts, "bash -lc '"+envPrefix+"./dialtone.sh mesh v1 build --host local --arch host'")
 	parts = append(parts, startCmd)
 	cmd := strings.Join(parts, " && ")
 
