@@ -72,6 +72,8 @@ func Run(args []string) error {
 		return runStart(paths, rest)
 	case "join":
 		return runJoin(paths, rest)
+	case "shell-server":
+		return runShellServer(paths, rest)
 	default:
 		printUsage()
 		return fmt.Errorf("unknown mesh command: %s", command)
@@ -129,11 +131,15 @@ func printUsage() {
 	logs.Raw("  join [--host <name|all|local>] [--repo-dir PATH] [--skip-self=true|false] [--with-install]")
 	logs.Raw("       [--bind-ip 0.0.0.0] [--bind-port 19001] [--peer-ip IP] [--peer-port P] [--no-send=true|false]")
 	logs.Raw("          Build and start mesh on local/remote host(s) using mesh mod itself")
+	logs.Raw("  shell-server [--host <name|all|local>] [--repo-dir PATH] [--skip-self=true|false] [--with-build]")
+	logs.Raw("               [--bind-ip 0.0.0.0] [--http-port 8787] [--script-path PATH] [--foreground] [--dry-run]")
+	logs.Raw("          Serve dialtone bootstrap script via mesh binary (C HTTP mode)")
 	logs.Raw("")
 	logs.Raw("Examples:")
 	logs.Raw("  ./dialtone.sh mesh v1 join")
 	logs.Raw("  ./dialtone.sh mesh v1 join --host all --skip-self=true")
 	logs.Raw("  ./dialtone.sh mesh v1 build --arch host")
+	logs.Raw("  ./dialtone.sh mesh v1 shell-server --http-port 8787")
 }
 
 func resolvePaths(start string) (Paths, error) {
@@ -489,9 +495,10 @@ func runStart(paths Paths, args []string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()
-	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644)
-	logs.Info("mesh started in background pid=%d log=%s", cmd.Process.Pid, logPath)
+	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(pid)+"\n"), 0o644)
+	logs.Info("mesh started in background pid=%d log=%s", pid, logPath)
 	return nil
 }
 
@@ -572,6 +579,123 @@ func runJoin(paths Paths, args []string) error {
 		return err
 	}
 	return joinRemoteNode(node, strings.TrimSpace(*repoDir), *withInstall, strings.TrimSpace(*bindIP), *bindPort, strings.TrimSpace(*peerIP), *peerPort, *noSend)
+}
+
+func runShellServer(paths Paths, args []string) error {
+	fs := flag.NewFlagSet("mesh-shell-server", flag.ContinueOnError)
+	host := fs.String("host", "local", "Target host: local, mesh node, or all")
+	repoDir := fs.String("repo-dir", "", "Remote repo dir override")
+	skipSelf := fs.Bool("skip-self", true, "When --host all, skip current local mesh node")
+	withBuild := fs.Bool("with-build", true, "Ensure host mesh binary is built before serving")
+	bindIP := fs.String("bind-ip", "0.0.0.0", "Shell server bind IP")
+	httpPort := fs.Int("http-port", 8787, "Shell server HTTP port")
+	scriptPath := fs.String("script-path", "", "Path to dialtone.sh (default: <repo>/dialtone.sh)")
+	foreground := fs.Bool("foreground", true, "Run in foreground (local only)")
+	dryRun := fs.Bool("dry-run", false, "Print remote commands without executing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *httpPort <= 0 || *httpPort > 65535 {
+		return fmt.Errorf("invalid --http-port %d", *httpPort)
+	}
+	script := strings.TrimSpace(*scriptPath)
+	if script == "" {
+		script = filepath.Join(paths.Runtime.RepoRoot, "dialtone.sh")
+	}
+	target := strings.ToLower(strings.TrimSpace(*host))
+	if target == "" || target == "local" {
+		if *withBuild {
+			if err := runBuild(paths, []string{"--host", "local", "--arch", "host"}); err != nil {
+				return err
+			}
+		}
+		bin, err := ensureHostBinary(paths)
+		if err != nil {
+			return err
+		}
+		cmdArgs := []string{
+			"--shell-server",
+			"--bind-ip", strings.TrimSpace(*bindIP),
+			"--http-port", strconv.Itoa(*httpPort),
+			"--script-path", script,
+		}
+		if *foreground {
+			return runCmd("", bin, cmdArgs...)
+		}
+		stateDir := filepath.Join(paths.Runtime.DialtoneEnv, "mesh", "v1")
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return err
+		}
+		logPath := filepath.Join(stateDir, "shell-server.log")
+		pidPath := filepath.Join(stateDir, "shell-server.pid")
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return err
+		}
+		defer logFile.Close()
+		cmd := exec.Command(bin, cmdArgs...)
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		cmd.Stdin = nil
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		pid := cmd.Process.Pid
+		_ = cmd.Process.Release()
+		_ = os.WriteFile(pidPath, []byte(strconv.Itoa(pid)+"\n"), 0o644)
+		logs.Info("mesh shell-server started pid=%d log=%s", pid, logPath)
+		return nil
+	}
+
+	runNode := func(node sshv1.MeshNode) error {
+		if target == "all" && *skipSelf && isSelfMeshNode(node) {
+			logs.Raw("== %s ==\nSKIP self node", node.Name)
+			return nil
+		}
+		rd := strings.TrimSpace(*repoDir)
+		if rd == "" {
+			rd = defaultRepoDirForNode(node)
+		}
+		parts := []string{"set -e", "cd " + shellQuote(rd)}
+		if *withBuild {
+			parts = append(parts, "./dialtone.sh mesh v1 build --host local --arch host")
+		}
+		parts = append(parts, "./dialtone.sh mesh v1 shell-server --host local --bind-ip "+
+			shellQuote(strings.TrimSpace(*bindIP))+" --http-port "+strconv.Itoa(*httpPort)+
+			" --script-path "+shellQuote(filepath.ToSlash(filepath.Join(rd, "dialtone.sh")))+
+			" --foreground")
+		cmd := strings.Join(parts, " && ")
+		logs.Raw("== %s ==", node.Name)
+		if *dryRun {
+			logs.Raw("[DRY-RUN] %s", cmd)
+			return nil
+		}
+		out, err := sshv1.RunNodeCommand(node.Name, cmd, sshv1.CommandOptions{})
+		if strings.TrimSpace(out) != "" {
+			logs.Raw("%s", strings.TrimRight(out, "\n"))
+		}
+		return err
+	}
+
+	if target == "all" {
+		failed := 0
+		for _, n := range sshv1.ListMeshNodes() {
+			if err := runNode(n); err != nil {
+				failed++
+				logs.Raw("ERROR: %v", err)
+			}
+		}
+		if failed > 0 {
+			return fmt.Errorf("shell-server finished with %d host failures", failed)
+		}
+		return nil
+	}
+
+	node, err := sshv1.ResolveMeshNode(target)
+	if err != nil {
+		return err
+	}
+	return runNode(node)
 }
 
 func joinRemoteNode(node sshv1.MeshNode, repoDirOverride string, withInstall bool, bindIP string, bindPort int, peerIP string, peerPort int, noSend bool) error {

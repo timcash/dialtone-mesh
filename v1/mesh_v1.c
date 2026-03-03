@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <uv.h>
 
@@ -38,6 +41,9 @@ static void usage(const char *prog) {
           "Usage:\n"
           "  %s --bind-port <port> [options]\n\n"
           "Options:\n"
+          "  --shell-server           Run simple HTTP server for dialtone bootstrap script\n"
+          "  --http-port <port>       HTTP listen port for --shell-server (default: 8787)\n"
+          "  --script-path <path>     Script path for --shell-server (default: ./dialtone.sh)\n"
           "  --bind-ip <ip>           Local bind IP (default: 0.0.0.0)\n"
           "  --bind-port <port>       Local UDP port (required)\n"
           "  --peer-ip <ip>           Remote peer IP\n"
@@ -51,6 +57,143 @@ static void usage(const char *prog) {
           "  --exit-after-ms <ms>     Optional timeout for exit\n"
           "  --help                   Show this help\n",
           prog);
+}
+
+static int read_file(const char *path, char **out, size_t *out_len) {
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) return -1;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return -1;
+  }
+  long sz = ftell(f);
+  if (sz < 0) {
+    fclose(f);
+    return -1;
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return -1;
+  }
+  char *buf = malloc((size_t) sz);
+  if (buf == NULL && sz > 0) {
+    fclose(f);
+    return -1;
+  }
+  if (sz > 0 && fread(buf, 1, (size_t) sz, f) != (size_t) sz) {
+    free(buf);
+    fclose(f);
+    return -1;
+  }
+  fclose(f);
+  *out = buf;
+  *out_len = (size_t) sz;
+  return 0;
+}
+
+static int send_all(int fd, const char *buf, size_t len) {
+  size_t written = 0;
+  while (written < len) {
+    ssize_t n = send(fd, buf + written, len - written, 0);
+    if (n <= 0) return -1;
+    written += (size_t) n;
+  }
+  return 0;
+}
+
+static int run_shell_server(const char *bind_ip, uint32_t http_port, const char *script_path) {
+  int sfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sfd < 0) {
+    fprintf(stderr, "socket failed: %s\n", strerror(errno));
+    return 1;
+  }
+  int opt = 1;
+  if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+    fprintf(stderr, "setsockopt failed: %s\n", strerror(errno));
+    close(sfd);
+    return 1;
+  }
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t) http_port);
+  if (inet_pton(AF_INET, bind_ip, &addr.sin_addr) != 1) {
+    fprintf(stderr, "invalid --bind-ip for shell server (IPv4 only): %s\n", bind_ip);
+    close(sfd);
+    return 1;
+  }
+  if (bind(sfd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
+    fprintf(stderr, "bind failed: %s\n", strerror(errno));
+    close(sfd);
+    return 1;
+  }
+  if (listen(sfd, 64) != 0) {
+    fprintf(stderr, "listen failed: %s\n", strerror(errno));
+    close(sfd);
+    return 1;
+  }
+
+  printf("mesh shell server listening on http://%s:%u (script=%s)\n", bind_ip, http_port, script_path);
+  fflush(stdout);
+
+  while (1) {
+    int cfd = accept(sfd, NULL, NULL);
+    if (cfd < 0) {
+      if (errno == EINTR) continue;
+      fprintf(stderr, "accept failed: %s\n", strerror(errno));
+      continue;
+    }
+
+    char req[2048];
+    ssize_t n = recv(cfd, req, sizeof(req) - 1, 0);
+    if (n <= 0) {
+      close(cfd);
+      continue;
+    }
+    req[n] = '\0';
+
+    bool want_script = false;
+    if (strncmp(req, "GET /dialtone.sh ", 17) == 0 || strncmp(req, "GET / ", 6) == 0) {
+      want_script = true;
+    }
+
+    if (!want_script) {
+      const char *resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+      (void) send_all(cfd, resp, strlen(resp));
+      close(cfd);
+      continue;
+    }
+
+    char *body = NULL;
+    size_t body_len = 0;
+    if (read_file(script_path, &body, &body_len) != 0) {
+      const char *resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+      (void) send_all(cfd, resp, strlen(resp));
+      close(cfd);
+      continue;
+    }
+
+    char header[256];
+    int header_len = snprintf(
+      header, sizeof(header),
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/x-sh\r\n"
+      "Content-Length: %zu\r\n"
+      "Connection: close\r\n\r\n",
+      body_len
+    );
+    if (header_len < 0 || header_len >= (int) sizeof(header)) {
+      free(body);
+      close(cfd);
+      continue;
+    }
+    if (send_all(cfd, header, (size_t) header_len) == 0) {
+      (void) send_all(cfd, body, body_len);
+    }
+    free(body);
+    close(cfd);
+  }
 }
 
 static int parse_u32(const char *s, uint32_t *out) {
@@ -138,9 +281,12 @@ static void on_exit_timer(uv_timer_t *t) {
 int main(int argc, char **argv) {
   const char *bind_ip = "0.0.0.0";
   const char *effective_bind_ip = bind_ip;
+  const char *script_path = "./dialtone.sh";
   uint32_t bind_port = 0;
+  uint32_t http_port = 8787;
   const char *peer_ip = NULL;
   uint32_t peer_port = 0;
+  bool shell_server = false;
 
   app_t app;
   memset(&app, 0, sizeof(app));
@@ -155,10 +301,16 @@ int main(int argc, char **argv) {
     if (strcmp(arg, "--help") == 0) {
       usage(argv[0]);
       return 0;
+    } else if (strcmp(arg, "--shell-server") == 0) {
+      shell_server = true;
     } else if (strcmp(arg, "--no-send") == 0) {
       app.no_send = true;
     } else if (strcmp(arg, "--bind-ip") == 0 && i + 1 < argc) {
       bind_ip = argv[++i];
+    } else if (strcmp(arg, "--script-path") == 0 && i + 1 < argc) {
+      script_path = argv[++i];
+    } else if (strcmp(arg, "--http-port") == 0 && i + 1 < argc) {
+      if (parse_u32(argv[++i], &http_port) != 0 || http_port > 65535 || http_port == 0) return 1;
     } else if (strcmp(arg, "--peer-ip") == 0 && i + 1 < argc) {
       peer_ip = argv[++i];
     } else if (strcmp(arg, "--message") == 0 && i + 1 < argc) {
@@ -182,6 +334,8 @@ int main(int argc, char **argv) {
       return 1;
     }
   }
+
+  if (shell_server) return run_shell_server(bind_ip, http_port, script_path);
 
   if (bind_port == 0) {
     fprintf(stderr, "--bind-port is required\n");
@@ -237,4 +391,3 @@ int main(int argc, char **argv) {
   uv_run(app.loop, UV_RUN_DEFAULT);
   return 0;
 }
-
