@@ -264,9 +264,9 @@ func runBuildRemote(paths Paths, host, arch, repoDir string, skipSelf, withInsta
 		}
 		parts := []string{"set -e", "cd " + shellQuote(rd)}
 		if withInstall {
-			parts = append(parts, "./dialtone.sh mesh v1 install --skip-apt")
+			parts = append(parts, buildRemoteNixInstallCommand(rd))
 		}
-		parts = append(parts, "./dialtone.sh mesh v1 build --host local --arch "+shellQuote(arch))
+		parts = append(parts, buildRemoteNixBuildCommand(rd, arch))
 		cmd := strings.Join(parts, " && ")
 		logs.Raw("== %s ==", node.Name)
 		if dryRun {
@@ -299,6 +299,54 @@ func runBuildRemote(paths Paths, host, arch, repoDir string, skipSelf, withInsta
 		return err
 	}
 	return runNode(node)
+}
+
+func buildRemoteNixInstallCommand(repoDir string) string {
+	inner := strings.Join([]string{
+		"set -e",
+		"cd " + shellQuote(filepath.ToSlash(filepath.Join(repoDir, "src/mods/mesh/v1/libudx"))),
+		"npm install",
+	}, " && ")
+	return strings.Join([]string{
+		"if [ -f \"$HOME/.nix-profile/etc/profile.d/nix.sh\" ]; then . \"$HOME/.nix-profile/etc/profile.d/nix.sh\"; fi",
+		"if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; fi",
+		"command -v nix >/dev/null 2>&1",
+		"nix --extra-experimental-features 'nix-command flakes' develop " + shellQuote("path:"+filepath.ToSlash(repoDir)) + " --command bash -lc " + shellQuote(inner),
+	}, " && ")
+}
+
+func buildRemoteNixBuildCommand(repoDir, arch string) string {
+	archTarget := strings.ToLower(strings.TrimSpace(arch))
+	if archTarget == "" {
+		archTarget = "host"
+	}
+	inner := strings.Join([]string{
+		"set -e",
+		"cd " + shellQuote(filepath.ToSlash(filepath.Join(repoDir, "src/mods/mesh/v1"))),
+		"mkdir -p bin",
+		"cd libudx",
+		"npm install",
+		"npx bare-make generate",
+		"npx bare-make build",
+		"cd ..",
+		"UDX_LIB=$(find libudx/build -name libudx.a | head -n1)",
+		"UV_LIB=$(find libudx/build -name libuv.a | head -n1)",
+		"if [ -z \"$UDX_LIB\" ] || [ -z \"$UV_LIB\" ]; then echo DIALTONE_MESH_BUILD_MISSING_LIBS; exit 1; fi",
+		"EXTRA_LIBS='-lpthread -ldl -lm'",
+		"if [ \"$(uname -s)\" = \"Linux\" ]; then EXTRA_LIBS='-pthread -ldl -lrt -lm'; fi",
+		"OUT=bin/dialtone_mesh_v1_x86_64",
+		"if [ " + shellQuote(archTarget) + " = arm64 ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
+		"if [ " + shellQuote(archTarget) + " = host ] && [ \"$(uname -m)\" = \"arm64\" ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
+		"if [ " + shellQuote(archTarget) + " = host ] && [ \"$(uname -m)\" = \"aarch64\" ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
+		"cc mesh_v1.c -Os -s -Wall -Wextra -Ilibudx/include -Ilibudx/build/_deps/github+libuv+libuv-src/include \"$UDX_LIB\" \"$UV_LIB\" $EXTRA_LIBS -o \"$OUT\"",
+		"echo DIALTONE_MESH_BUILD_OK:$OUT",
+	}, " && ")
+	return strings.Join([]string{
+		"if [ -f \"$HOME/.nix-profile/etc/profile.d/nix.sh\" ]; then . \"$HOME/.nix-profile/etc/profile.d/nix.sh\"; fi",
+		"if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; fi",
+		"command -v nix >/dev/null 2>&1",
+		"nix --extra-experimental-features 'nix-command flakes' develop " + shellQuote("path:"+filepath.ToSlash(repoDir)) + " --command bash -lc " + shellQuote(inner),
+	}, " && ")
 }
 
 func runTest(paths Paths, args []string) error {
@@ -746,10 +794,10 @@ func buildLibudxNative(paths Paths) error {
 	if err := runCmd(paths.LibudxDir, "npm", "install"); err != nil {
 		return err
 	}
-	if err := runCmd(paths.LibudxDir, "bare-make", "generate"); err != nil {
+	if err := runCmd(paths.LibudxDir, "npx", "bare-make", "generate"); err != nil {
 		return err
 	}
-	return runCmd(paths.LibudxDir, "bare-make", "build")
+	return runCmd(paths.LibudxDir, "npx", "bare-make", "build")
 }
 
 func buildAMD64(paths Paths) error {
@@ -763,7 +811,7 @@ func buildAMD64(paths Paths) error {
 	}
 	args := []string{
 		paths.SourceC,
-		"-O2", "-Wall", "-Wextra",
+		"-Os", "-s", "-Wall", "-Wextra",
 		"-I" + filepath.Join(paths.LibudxDir, "include"),
 		"-I" + filepath.Join(paths.LibudxDir, "build", "_deps", "github+libuv+libuv-src", "include"),
 		udxLib, uvLib,
@@ -806,7 +854,7 @@ func buildARM64(paths Paths) error {
 	}
 	args := []string{
 		paths.SourceC,
-		"-O2", "-Wall", "-Wextra",
+		"-Os", "-s", "-Wall", "-Wextra",
 		"-I" + filepath.Join(paths.LibudxDir, "include"),
 		"-I" + filepath.Join(paths.LibudxDir, "build-arm64-local", "_deps", "github+libuv+libuv-src", "include"),
 		udxLib, uvLib,
@@ -892,7 +940,7 @@ func defaultRepoDirForNode(node sshv1.MeshNode) string {
 }
 
 func isSelfMeshNode(node sshv1.MeshNode) bool {
-	if os.Getenv("WSL_DISTRO_NAME") != "" && strings.EqualFold(node.Name, "wsl") {
+	if (os.Getenv("WSL_DISTRO_NAME") != "" || os.Getenv("WSL_INTEROP") != "") && strings.EqualFold(node.Name, "wsl") {
 		return true
 	}
 	hn, err := os.Hostname()
