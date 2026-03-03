@@ -1,0 +1,11 @@
+[package]
+name = "mesh-v3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+iroh = "*"
+iroh-ping = "*"
+iroh-tickets = "*"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

@@ -1,46 +1,76 @@
-# mesh v2 Makefile
+# mesh v2 build
+#
+# Upstream libudx + bare-make flow:
+#   npm install
+#   bare-make generate
+#   bare-make build
 
-CC = cc
+CC := clang
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
-# Defaults
-OUT = dialtone_mesh_v2
-LIBUDX_DIR = libudx
-LIBUDX_BUILD = $(LIBUDX_DIR)/build
-UDX_LIB = $(shell find $(LIBUDX_BUILD) -name libudx.a | head -n1)
-UV_LIB = $(shell find $(LIBUDX_BUILD) -name libuv.a | head -n1)
+OUT := dialtone_mesh_v2_$(UNAME_M)
+REPO_ROOT := $(abspath $(CURDIR)/../../../..)
+BIN_DIR := $(REPO_ROOT)/bin
+OUT_BIN := $(BIN_DIR)/$(OUT)
+EX_CLIENT := $(BIN_DIR)/dialtone_libudx_client_$(UNAME_M)
+EX_SERVER := $(BIN_DIR)/dialtone_libudx_server_$(UNAME_M)
+EX_UDXPERF := $(BIN_DIR)/dialtone_libudx_udxperf_$(UNAME_M)
+LIBUDX_DIR := libudx
+LIBUDX_BUILD := $(LIBUDX_DIR)/build
+UDX_LIB := $(LIBUDX_BUILD)/libudx.a
+UV_LIB := $(LIBUDX_BUILD)/_deps/github+libuv+libuv-build/libuv.a
 
-CFLAGS = -Os -s -Wall -Wextra -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE
-INCLUDES = -I$(LIBUDX_DIR)/include -I$(LIBUDX_BUILD)/_deps/github+libuv+libuv-src/include
+CFLAGS := -Os -s -Wall -Wextra
+INCLUDES := -I$(LIBUDX_DIR)/include -I$(LIBUDX_BUILD)/_deps/github+libuv+libuv-src/include
 
 ifeq ($(UNAME_S),Darwin)
-	CC = clang
-	CFLAGS += -mmacosx-version-min=12.0
-	LIBS = -lpthread -ldl -lm -framework CoreFoundation -framework Security -framework IOKit
-	OUT_BIN = $(OUT)_$(UNAME_M)
+  LIBS := -lpthread -ldl -lm -framework CoreFoundation -framework Security -framework IOKit
 else
-	# Linux build
-	CC = gcc
-	LIBS = -lpthread -ldl -lrt -lm
-	OUT_BIN = $(OUT)_$(UNAME_M)
+  LIBS := -lpthread -ldl -lrt -lm
 endif
 
-.PHONY: all clean libudx
+.PHONY: all deps generate build-libudx examples mesh clean help
 
-all: $(OUT_BIN)
+all: mesh
 
-libudx:
+deps:
 	cd $(LIBUDX_DIR) && npm install
-	cd $(LIBUDX_DIR) && CC=$(CC) npx bare-make generate -D CMAKE_C_COMPILER=$(CC) -D CMAKE_C_FLAGS="-Wno-error -D_FILE_OFFSET_BITS=32"
+
+generate: deps
+	cd $(LIBUDX_DIR) && npx bare-make generate
+
+build-libudx: generate
 	cd $(LIBUDX_DIR) && npx bare-make build
 
-$(OUT_BIN): mesh_v2.c libudx
-	$(CC) mesh_v2.c $(CFLAGS) $(INCLUDES) $(UDX_LIB) $(UV_LIB) $(LIBS) -o $(OUT_BIN)
+# Examples are built by `bare-make build` (client/server/udxperf).
+examples: build-libudx
+	mkdir -p $(BIN_DIR)
+	cp $(LIBUDX_BUILD)/examples/client $(EX_CLIENT)
+	cp $(LIBUDX_BUILD)/examples/server $(EX_SERVER)
+	cp $(LIBUDX_BUILD)/examples/udxperf $(EX_UDXPERF)
+	@echo "Built examples:"
+	@echo "  $(EX_CLIENT)"
+	@echo "  $(EX_SERVER)"
+	@echo "  $(EX_UDXPERF)"
 
-deploy-rover: $(OUT)_arm64
-	scp $(OUT)_arm64 rover:~/dialtone/
+mesh: build-libudx
+	mkdir -p $(BIN_DIR)
+	$(CC) mesh_v2.c $(CFLAGS) $(INCLUDES) $(UDX_LIB) $(UV_LIB) $(LIBS) -o $(OUT_BIN)
+	@echo "Built: $(OUT_BIN)"
+
+help:
+	@echo "Targets:"
+	@echo "  make deps          - npm install in libudx"
+	@echo "  make generate      - bare-make generate in libudx"
+	@echo "  make build-libudx  - bare-make build in libudx"
+	@echo "  make examples      - build and print example binary paths"
+	@echo "  make mesh          - build mesh_v2 binary"
+	@echo "  make all           - same as make mesh"
+	@echo ""
+	@echo "Use with Dialtone nix shell on WSL or gold:"
+	@echo "  ~/dialtone/dialtone.sh make -C ~/dialtone/src/mods/mesh/v2 mesh"
 
 clean:
-	rm -f $(OUT)_*
+	rm -f $(OUT_BIN) $(EX_CLIENT) $(EX_SERVER) $(EX_UDXPERF)
 	rm -rf $(LIBUDX_BUILD)
