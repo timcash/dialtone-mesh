@@ -335,12 +335,15 @@ func buildRemoteNixBuildCommand(repoDir, arch string, os string) string {
 		"UV_LIB=$(find libudx/build -name libuv.a | head -n1)",
 		"if [ -z \"$UDX_LIB\" ] || [ -z \"$UV_LIB\" ]; then echo DIALTONE_MESH_BUILD_MISSING_LIBS; exit 1; fi",
 		"EXTRA_LIBS='-lpthread -ldl -lm'",
-		"if [ \"$(uname -s)\" = \"Linux\" ]; then EXTRA_LIBS='-pthread -ldl -lrt -lm'; fi",
+		"if [ \"$(uname -s)\" = \"Linux\" ]; then EXTRA_LIBS='-static -pthread -ldl -lrt -lm'; fi",
 		"OUT=bin/dialtone_mesh_v1_x86_64",
 		"if [ " + shellQuote(archTarget) + " = arm64 ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
 		"if [ " + shellQuote(archTarget) + " = host ] && [ \"$(uname -m)\" = \"arm64\" ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
 		"if [ " + shellQuote(archTarget) + " = host ] && [ \"$(uname -m)\" = \"aarch64\" ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
-		"cc mesh_v1.c -Os -s -Wall -Wextra -Ilibudx/include -Ilibudx/build/_deps/github+libuv+libuv-src/include \"$UDX_LIB\" \"$UV_LIB\" $EXTRA_LIBS -o \"$OUT\"",
+		"if [ \"$(uname -s)\" = \"Windows_NT\" ] || [ \"$(uname -s)\" = \"MINGW64_NT-10.0\" ]; then OUT=\"$OUT.exe\"; EXTRA_LIBS='-lws2_32 -luserenv -liphlpapi -lpsapi -lntdll'; fi",
+		"CC=cc",
+		"if [ \"$(uname -s)\" = \"Linux\" ] && command -v musl-gcc >/dev/null 2>&1; then CC=musl-gcc; fi",
+		"$CC mesh_v1.c -Os -s -Wall -Wextra -Ilibudx/include -Ilibudx/build/_deps/github+libuv+libuv-src/include \"$UDX_LIB\" \"$UV_LIB\" $EXTRA_LIBS -o \"$OUT\"",
 		"echo DIALTONE_MESH_BUILD_OK:$OUT",
 	}, " && ")
 
@@ -837,13 +840,21 @@ func buildAMD64(paths Paths) error {
 		udxLib, uvLib,
 	}
 	cc := "gcc"
+	out := paths.BinAMD64
 	if runtime.GOOS == "darwin" || runtime.GOOS == "macos" {
 		cc = "clang"
 		args = append(args, "-lpthread", "-ldl", "-lm")
+	} else if runtime.GOOS == "windows" {
+		cc = "x86_64-w64-mingw32-gcc"
+		args = append(args, "-lws2_32", "-luserenv", "-liphlpapi", "-lpsapi", "-lntdll")
+		out += ".exe"
 	} else {
-		args = append(args, "-pthread", "-ldl", "-lrt", "-lm")
+		if _, err := exec.LookPath("musl-gcc"); err == nil {
+			cc = "musl-gcc"
+		}
+		args = append(args, "-static", "-pthread", "-ldl", "-lrt", "-lm")
 	}
-	args = append(args, "-o", paths.BinAMD64)
+	args = append(args, "-o", out)
 	return runCmd(paths.VersionDir, cc, args...)
 }
 
@@ -905,7 +916,10 @@ func buildARM64(paths Paths) error {
 	if isDarwin {
 		args = append(args, "-lpthread", "-ldl", "-lm")
 	} else {
-		args = append(args, "-pthread", "-ldl", "-lrt", "-lm")
+		if _, err := exec.LookPath("musl-gcc"); err == nil && (runtime.GOARCH == "arm64") {
+			cc = "musl-gcc"
+		}
+		args = append(args, "-static", "-pthread", "-ldl", "-lrt", "-lm")
 	}
 	args = append(args, "-o", paths.BinARM64)
 	return runCmd(paths.VersionDir, cc, args...)

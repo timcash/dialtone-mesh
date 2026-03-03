@@ -1,4 +1,15 @@
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define shell_close closesocket
+#else
 #include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#define shell_close close
+#endif
+
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -6,9 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <uv.h>
 
@@ -102,15 +110,31 @@ static int send_all(int fd, const char *buf, size_t len) {
 }
 
 static int run_shell_server(const char *bind_ip, uint32_t http_port, const char *script_path) {
+#ifdef _WIN32
+  WSADATA wsa_data;
+  if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+    fprintf(stderr, "WSAStartup failed\n");
+    return 1;
+  }
+#endif
+
   int sfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sfd < 0) {
+#ifdef _WIN32
+    fprintf(stderr, "socket failed: %d\n", WSAGetLastError());
+#else
     fprintf(stderr, "socket failed: %s\n", strerror(errno));
+#endif
     return 1;
   }
   int opt = 1;
-  if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+  if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt)) != 0) {
+#ifdef _WIN32
+    fprintf(stderr, "setsockopt failed: %d\n", WSAGetLastError());
+#else
     fprintf(stderr, "setsockopt failed: %s\n", strerror(errno));
-    close(sfd);
+#endif
+    shell_close(sfd);
     return 1;
   }
 
@@ -120,17 +144,25 @@ static int run_shell_server(const char *bind_ip, uint32_t http_port, const char 
   addr.sin_port = htons((uint16_t) http_port);
   if (inet_pton(AF_INET, bind_ip, &addr.sin_addr) != 1) {
     fprintf(stderr, "invalid --bind-ip for shell server (IPv4 only): %s\n", bind_ip);
-    close(sfd);
+    shell_close(sfd);
     return 1;
   }
   if (bind(sfd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
+#ifdef _WIN32
+    fprintf(stderr, "bind failed: %d\n", WSAGetLastError());
+#else
     fprintf(stderr, "bind failed: %s\n", strerror(errno));
-    close(sfd);
+#endif
+    shell_close(sfd);
     return 1;
   }
   if (listen(sfd, 64) != 0) {
+#ifdef _WIN32
+    fprintf(stderr, "listen failed: %d\n", WSAGetLastError());
+#else
     fprintf(stderr, "listen failed: %s\n", strerror(errno));
-    close(sfd);
+#endif
+    shell_close(sfd);
     return 1;
   }
 
@@ -140,15 +172,21 @@ static int run_shell_server(const char *bind_ip, uint32_t http_port, const char 
   while (1) {
     int cfd = accept(sfd, NULL, NULL);
     if (cfd < 0) {
+#ifndef _WIN32
       if (errno == EINTR) continue;
+#endif
+#ifdef _WIN32
+      fprintf(stderr, "accept failed: %d\n", WSAGetLastError());
+#else
       fprintf(stderr, "accept failed: %s\n", strerror(errno));
+#endif
       continue;
     }
 
     char req[2048];
     ssize_t n = recv(cfd, req, sizeof(req) - 1, 0);
     if (n <= 0) {
-      close(cfd);
+      shell_close(cfd);
       continue;
     }
     req[n] = '\0';
@@ -161,7 +199,7 @@ static int run_shell_server(const char *bind_ip, uint32_t http_port, const char 
     if (!want_script) {
       const char *resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
       (void) send_all(cfd, resp, strlen(resp));
-      close(cfd);
+      shell_close(cfd);
       continue;
     }
 
@@ -170,7 +208,7 @@ static int run_shell_server(const char *bind_ip, uint32_t http_port, const char 
     if (read_file(script_path, &body, &body_len) != 0) {
       const char *resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
       (void) send_all(cfd, resp, strlen(resp));
-      close(cfd);
+      shell_close(cfd);
       continue;
     }
 
@@ -185,14 +223,14 @@ static int run_shell_server(const char *bind_ip, uint32_t http_port, const char 
     );
     if (header_len < 0 || header_len >= (int) sizeof(header)) {
       free(body);
-      close(cfd);
+      shell_close(cfd);
       continue;
     }
     if (send_all(cfd, header, (size_t) header_len) == 0) {
       (void) send_all(cfd, body, body_len);
     }
     free(body);
-    close(cfd);
+    shell_close(cfd);
   }
 }
 
