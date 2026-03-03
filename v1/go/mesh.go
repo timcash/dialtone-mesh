@@ -836,13 +836,15 @@ func buildAMD64(paths Paths) error {
 		"-I" + filepath.Join(paths.LibudxDir, "build", "_deps", "github+libuv+libuv-src", "include"),
 		udxLib, uvLib,
 	}
-	if runtime.GOOS == "linux" {
-		args = append(args, "-pthread", "-ldl", "-lrt", "-lm")
-	} else {
+	cc := "gcc"
+	if runtime.GOOS == "darwin" || runtime.GOOS == "macos" {
+		cc = "clang"
 		args = append(args, "-lpthread", "-ldl", "-lm")
+	} else {
+		args = append(args, "-pthread", "-ldl", "-lrt", "-lm")
 	}
 	args = append(args, "-o", paths.BinAMD64)
-	return runCmd(paths.VersionDir, "gcc", args...)
+	return runCmd(paths.VersionDir, cc, args...)
 }
 
 func buildARM64(paths Paths) error {
@@ -850,7 +852,7 @@ func buildARM64(paths Paths) error {
 	isDarwin := runtime.GOOS == "darwin" || runtime.GOOS == "macos"
 
 	if isDarwin {
-		cc = "gcc"
+		cc = "clang"
 	} else {
 		if _, err := exec.LookPath(cc); err != nil {
 			return fmt.Errorf("missing aarch64-linux-gnu-gcc (run install first)")
