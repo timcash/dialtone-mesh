@@ -328,7 +328,9 @@ func buildRemoteNixBuildCommand(repoDir, arch string, os string) string {
 		"mkdir -p bin",
 		"cd libudx",
 		"npm install",
-		"npx bare-make generate",
+		"CC=cc",
+		"if [ \"$(uname -s)\" = \"Linux\" ] && command -v musl-gcc >/dev/null 2>&1; then CC=musl-gcc; fi",
+		"npx bare-make generate -D CMAKE_C_COMPILER=\"$CC\"",
 		"npx bare-make build",
 		"cd ..",
 		"UDX_LIB=$(find libudx/build -name libudx.a | head -n1)",
@@ -341,8 +343,6 @@ func buildRemoteNixBuildCommand(repoDir, arch string, os string) string {
 		"if [ " + shellQuote(archTarget) + " = host ] && [ \"$(uname -m)\" = \"arm64\" ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
 		"if [ " + shellQuote(archTarget) + " = host ] && [ \"$(uname -m)\" = \"aarch64\" ]; then OUT=bin/dialtone_mesh_v1_arm64; fi",
 		"if [ \"$(uname -s)\" = \"Windows_NT\" ] || [ \"$(uname -s)\" = \"MINGW64_NT-10.0\" ]; then OUT=\"$OUT.exe\"; EXTRA_LIBS='-lws2_32 -luserenv -liphlpapi -lpsapi -lntdll'; fi",
-		"CC=cc",
-		"if [ \"$(uname -s)\" = \"Linux\" ] && command -v musl-gcc >/dev/null 2>&1; then CC=musl-gcc; fi",
 		"$CC mesh_v1.c -Os -s -Wall -Wextra -Ilibudx/include -Ilibudx/build/_deps/github+libuv+libuv-src/include \"$UDX_LIB\" \"$UV_LIB\" $EXTRA_LIBS -o \"$OUT\"",
 		"echo DIALTONE_MESH_BUILD_OK:$OUT",
 	}, " && ")
@@ -817,7 +817,13 @@ func buildLibudxNative(paths Paths) error {
 	if err := runCmd(paths.LibudxDir, "npm", "install"); err != nil {
 		return err
 	}
-	if err := runCmd(paths.LibudxDir, "npx", "bare-make", "generate"); err != nil {
+	cc := "cc"
+	if runtime.GOOS == "linux" {
+		if _, err := exec.LookPath("musl-gcc"); err == nil {
+			cc = "musl-gcc"
+		}
+	}
+	if err := runCmd(paths.LibudxDir, "npx", "bare-make", "generate", "-D", "CMAKE_C_COMPILER="+cc); err != nil {
 		return err
 	}
 	return runCmd(paths.LibudxDir, "npx", "bare-make", "build")
