@@ -148,7 +148,7 @@ fn spawn_auto_register(node: String, ticket: String, index_url: String) {
 }
 
 fn ticket_endpoint_id(ticket: &EndpointTicket) -> EndpointId {
-    ticket.endpoint_addr().node_id
+    ticket.endpoint_addr().id
 }
 
 async fn fetch_nodes(index_url: &str) -> Result<Vec<Entry>> {
@@ -456,6 +456,25 @@ async fn run_index(bind: &str) -> Result<()> {
     Ok(())
 }
 
+async fn run_hub(bind: &str) -> Result<()> {
+    let index_task = tokio::spawn({
+        let bind = bind.to_string();
+        async move { run_index(&bind).await }
+    });
+    let node_task = tokio::spawn(async move { run_node().await });
+
+    tokio::select! {
+        r = index_task => {
+            r.map_err(|e| anyhow!("index task join error: {e}"))??;
+            Ok(())
+        }
+        r = node_task => {
+            r.map_err(|e| anyhow!("node task join error: {e}"))??;
+            Ok(())
+        }
+    }
+}
+
 fn normalize_index(index_url: &str) -> String {
     index_url.trim_end_matches('/').to_string()
 }
@@ -508,6 +527,7 @@ fn usage() {
     eprintln!("  mesh-v3                # same as 'mesh-v3 node'");
     eprintln!("  mesh-v3 node");
     eprintln!("  mesh-v3 index [bind_addr]");
+    eprintln!("  mesh-v3 hub [bind_addr]  # run index + node together");
     eprintln!("  mesh-v3 register <index_url> <node> <ticket>");
     eprintln!("  mesh-v3 list <index_url>");
     eprintln!("  mesh-v3 connect <index_url> <node>");
@@ -523,6 +543,10 @@ async fn main() -> Result<()> {
         "index" => {
             let bind = args.next().unwrap_or_else(|| "0.0.0.0:8787".to_string());
             run_index(&bind).await
+        }
+        "hub" => {
+            let bind = args.next().unwrap_or_else(|| "0.0.0.0:8787".to_string());
+            run_hub(&bind).await
         }
         "register" => {
             let index_url = args

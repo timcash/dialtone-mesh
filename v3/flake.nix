@@ -20,9 +20,21 @@
       packages = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          crossPkgs = import nixpkgs {
+            inherit system;
+            crossSystem = {
+              config = "aarch64-unknown-linux-gnu";
+            };
+          };
         in {
           mesh-v3 = pkgs.rustPlatform.buildRustPackage {
             pname = "mesh-v3";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+          };
+          mesh-v3-rover = crossPkgs.rustPlatform.buildRustPackage {
+            pname = "mesh-v3-rover";
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
