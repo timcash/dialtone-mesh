@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env,
+    fs,
     net::SocketAddr,
+    path::Path as FsPath,
     str::FromStr,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -34,6 +36,7 @@ struct IndexState {
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     node: String,
+    #[serde(default)]
     node_id: String,
     ticket: String,
     updated_at_unix: u64,
@@ -50,6 +53,8 @@ struct RegisterRequest {
 struct RegisterResponse {
     ok: bool,
     entry: Entry,
+    #[serde(default)]
+    nodes: Vec<Entry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -147,6 +152,13 @@ fn endpoint_id_from_entry(entry: &Entry) -> Option<EndpointId> {
     })
 }
 
+fn normalize_entry(mut entry: Entry) -> Option<Entry> {
+    if entry.node_id.trim().is_empty() {
+        entry.node_id = endpoint_id_from_entry(&entry)?.to_string();
+    }
+    Some(entry)
+}
+
 fn retry_delay_secs(attempt: u32) -> u64 {
     match attempt {
         0 => 5,
@@ -157,9 +169,44 @@ fn retry_delay_secs(attempt: u32) -> u64 {
     }
 }
 
+fn default_peer_cache_path() -> String {
+    env::var("MESH_V3_PEER_CACHE_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{home}/dialtone/tmp/mesh-v3-peer-cache.json")
+        })
+}
+
+fn load_cache_file(path: &str) -> Vec<Entry> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<Entry>>(&raw) else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(normalize_entry)
+        .collect::<Vec<_>>()
+}
+
+fn write_cache_file(path: &str, entries: &[Entry]) {
+    if let Some(parent) = FsPath::new(path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(raw) = serde_json::to_string(entries) {
+        let _ = fs::write(path, raw);
+    }
+}
+
 fn merge_entries(cache: &Arc<Mutex<HashMap<String, Entry>>>, entries: &[Entry]) {
     if let Ok(mut map) = cache.lock() {
         for entry in entries {
+            let Some(entry) = normalize_entry(entry.clone()) else {
+                continue;
+            };
             match map.get(&entry.node_id) {
                 Some(existing) if existing.updated_at_unix > entry.updated_at_unix => {}
                 _ => {
@@ -179,8 +226,8 @@ fn cache_entries(cache: &Arc<Mutex<HashMap<String, Entry>>>) -> Vec<Entry> {
 
 fn entries_to_peer_ids(entries: &[Entry], self_id: EndpointId) -> Vec<EndpointId> {
     let mut out = Vec::new();
-    for entry in entries {
-        if let Some(id) = endpoint_id_from_entry(entry) {
+    for entry in entries.iter().cloned().filter_map(normalize_entry) {
+        if let Some(id) = endpoint_id_from_entry(&entry) {
             if id != self_id {
                 out.push(id);
             }
@@ -210,7 +257,13 @@ fn auto_register_enabled() -> bool {
     env::var("MESH_V3_NO_AUTO_REGISTER").is_err()
 }
 
-fn spawn_auto_register(node: String, node_id: String, endpoint: Endpoint, index_url: String) {
+fn spawn_auto_register(
+    node: String,
+    node_id: String,
+    endpoint: Endpoint,
+    index_url: String,
+    peer_cache: Arc<Mutex<HashMap<String, Entry>>>,
+) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         let url = format!("{}/register", normalize_index(&index_url));
@@ -225,7 +278,20 @@ fn spawn_auto_register(node: String, node_id: String, endpoint: Endpoint, index_
             let res = client.post(&url).json(&req).send().await;
             match res {
                 Ok(resp) if resp.status().is_success() => {
-                    logts!("auto-register ok node={} index={}", node, index_url);
+                    match resp.json::<RegisterResponse>().await {
+                        Ok(body) => {
+                            merge_entries(&peer_cache, &body.nodes);
+                            logts!(
+                                "auto-register ok node={} index={} peers={}",
+                                node,
+                                index_url,
+                                body.nodes.len()
+                            );
+                        }
+                        Err(err) => {
+                            logts!("auto-register parse error node={} err={}", node, err);
+                        }
+                    }
                     failure_attempt = 0;
                 }
                 Ok(resp) => {
@@ -303,6 +369,8 @@ async fn run_node() -> Result<()> {
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let ticket = EndpointTicket::new(addr.clone());
     let peer_cache: Arc<Mutex<HashMap<String, Entry>>> = Arc::new(Mutex::new(HashMap::new()));
+    let peer_cache_path = default_peer_cache_path();
+    merge_entries(&peer_cache, &load_cache_file(&peer_cache_path));
     merge_entries(
         &peer_cache,
         &[Entry {
@@ -327,6 +395,7 @@ async fn run_node() -> Result<()> {
             addr.id.to_string(),
             endpoint.clone(),
             index_url.clone(),
+            peer_cache.clone(),
         );
     }
 
@@ -335,7 +404,10 @@ async fn run_node() -> Result<()> {
         .accept(iroh_gossip::ALPN, gossip.clone())
         .spawn();
 
-    let initial_peers = fetch_peer_ids(&index_url, addr.id).await;
+    if let Some(nodes) = fetch_nodes_with_retry(&index_url).await {
+        merge_entries(&peer_cache, &nodes);
+    }
+    let initial_peers = entries_to_peer_ids(&cache_entries(&peer_cache), addr.id);
     let (gossip_sender, mut gossip_receiver) = gossip.subscribe(GOSSIP_TOPIC, initial_peers).await?.split();
 
     let receiver_cache = peer_cache.clone();
@@ -424,6 +496,15 @@ async fn run_node() -> Result<()> {
         }
     });
 
+    let persist_cache = peer_cache.clone();
+    let persist_path = peer_cache_path.clone();
+    tokio::spawn(async move {
+        loop {
+            write_cache_file(&persist_path, &cache_entries(&persist_cache));
+            sleep(Duration::from_secs(30)).await;
+        }
+    });
+
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
@@ -485,7 +566,12 @@ async fn http_register(
     map.insert(node_id, entry.clone());
     drop(map);
     publish_nodes(&state);
-    Ok(Json(RegisterResponse { ok: true, entry }))
+    let nodes = snapshot_nodes(&state)?;
+    Ok(Json(RegisterResponse {
+        ok: true,
+        entry,
+        nodes,
+    }))
 }
 
 async fn http_get_ticket(
@@ -645,8 +731,10 @@ async fn run_register(index_url: &str, node: &str, ticket: &str) -> Result<()> {
     }
     let body: RegisterResponse = resp.json().await?;
     println!(
-        "registered node={} updated_at_unix={}",
-        body.entry.node, body.entry.updated_at_unix
+        "registered node={} updated_at_unix={} peers={}",
+        body.entry.node,
+        body.entry.updated_at_unix,
+        body.nodes.len()
     );
     Ok(())
 }
