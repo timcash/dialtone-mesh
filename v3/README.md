@@ -12,7 +12,7 @@ Default mode is `node`.
 
 ```bash
 cd ~/dialtone/src/mods/mesh/v3
-./build.sh
+./build.sh --target native
 ```
 
 This builds with nix and links:
@@ -25,16 +25,28 @@ Use `./build.sh --rebuild` to force rebuild.
 
 ```bash
 cd ~/dialtone/src/mods/mesh/v3
-nix --extra-experimental-features "nix-command flakes" build .#mesh-v3-rover
+./build.sh --target rover
 ```
 
-This produces an `aarch64-linux` build suitable for rover.
+This produces an `aarch64-linux` build suitable for rover and links:
+
+- `~/dialtone/bin/mesh-v3_arm64` -> rover build
+
+`build.sh` uses separate nix out-links:
+
+- native: `.result-native`
+- rover: `.result-rover`
+
+This avoids cross-build collisions with the generic `result` symlink.
 
 ## Run node
 
 ```bash
-MESH_V3_NODE=gold MESH_V3_INDEX_URL=https://index.dialtone.earth \
-  ~/dialtone/bin/mesh-v3_$(uname -m) node
+~/dialtone/bin/mesh-v3_$(uname -m) \
+  --node gold \
+  --index-url https://index.dialtone.earth \
+  --dht \
+  node
 ```
 
 ## Run index
@@ -46,9 +58,24 @@ MESH_V3_NODE=gold MESH_V3_INDEX_URL=https://index.dialtone.earth \
 ## Run hub (index + node in one process)
 
 ```bash
-MESH_V3_NODE=wsl MESH_V3_INDEX_URL=https://index.dialtone.earth \
-  ~/dialtone/bin/mesh-v3_$(uname -m) hub 127.0.0.1:8787
+~/dialtone/bin/mesh-v3_$(uname -m) \
+  --node wsl \
+  --index-url https://index.dialtone.earth \
+  --dht \
+  hub 127.0.0.1:8787
 ```
+
+### Runtime flags
+
+- `--node <name>`
+- `--index-url <url>`
+- `--gossip-interval <secs>`
+- `--register-interval <secs>`
+- `--peer-cache <path>`
+- `--no-auto-register`
+- `--dht` / `--no-dht`
+- `--dns` / `--no-dns`
+- `--relay-only`
 
 ## APIs
 
@@ -95,3 +122,88 @@ What was tried to get `rover-1` gossip stable while on phone hotspot `tim`:
 - Confirmed SSH access to `gold` and `grey`.
 - Began scanning host logs for fresh rover heartbeats.
 - Need one cleanup step in remote grep commands (zsh glob handling) before final cross-host heartbeat proof is fully captured in this README.
+
+## Why rover may show fewer heartbeats on hotspot
+
+- Heartbeats are periodic, not continuous. If `MESH_V3_GOSSIP_INTERVAL_SECS` is `60`, a healthy peer only emits about one heartbeat per minute.
+- Phone hotspots often change NAT mappings and can briefly interrupt UDP reachability.
+- During those windows, gossip may route via relay or reconnect and you will see fewer inbound heartbeat lines even though the node is still alive and registering.
+- If older cached peer IDs accumulate, one host can appear as many peers until cache/index state is cleaned.
+
+Current expected steady-state for 4 hosts (`gold`, `grey`, `wsl`, `rover-1`):
+- each node should converge near `3` known peers (all others).
+
+### Verified routing state on rover (March 4, 2026)
+
+- Active network devices:
+  - `wlan1` connected to `tim`
+  - `eth0` connected only for `169.254.0.0/16` link-local
+- Default route:
+  - `default via 172.20.10.1 dev wlan1`
+- Internet route checks:
+  - `ip route get 1.1.1.1` -> `dev wlan1 src 172.20.10.3`
+  - `ip route get 8.8.8.8` -> `dev wlan1 src 172.20.10.3`
+
+Conclusion:
+- Internet-bound discovery/relay/gossip traffic is using hotspot (`wlan1`), not local-link (`eth0`).
+- Link-local is still used only for management SSH at `169.254.217.151`.
+
+## Hotspot constraints and iroh-based solutions
+
+Based on iroh endpoint/ticket/relay behavior in the docs:
+
+- iroh quickstart and endpoint model:
+  - https://docs.iroh.computer/quickstart
+  - https://docs.rs/iroh/latest/iroh/endpoint/
+- iroh ticket model (peer addressing):
+  - https://docs.rs/iroh-tickets/latest/iroh_tickets/endpoint/struct.EndpointTicket.html
+- gossip protocol API:
+  - https://docs.rs/iroh-gossip/latest/iroh_gossip/
+- DNS discovery behavior:
+  - https://docs.iroh.computer/connecting/dns-discovery
+
+### Practical fixes for hotspot reliability
+
+1. Keep one canonical peer record per host name.
+- Already applied in `merge_entries`: newest entry wins, older entries for same `node` are removed.
+- This prevents `gold`/`wsl`/`rover` duplicate IDs from inflating peer counts.
+
+2. Keep index registration frequent, gossip slightly slower.
+- Use fast register (`30s`) so fresh tickets are always available.
+- Use configurable heartbeat interval:
+  - `MESH_V3_GOSSIP_INTERVAL_SECS` (default `60`, min `10`).
+- On hotspot, setting `30` can improve observed liveness.
+
+3. Keep relay path available as fallback.
+- Hotspot NAT can block direct UDP holepunch at times.
+- iroh relay-backed connectivity is the fallback when direct path fails.
+- Ensure relay URLs are present in endpoint addresses and do not disable relay mode for hotspot nodes.
+
+4. Persist peer cache across restarts.
+- Already implemented (`~/dialtone/tmp/mesh-v3-peer-cache.json`).
+- Lets rover reconnect to known peers even if index fetch is temporarily failing.
+
+5. Keep index response and node parser backward-compatible.
+- Already implemented (`node_id` and `nodes` defaulting on decode).
+- Prevents mixed-version clusters from silently dropping heartbeat/register data.
+
+6. Optional: add a small stale-peer TTL at index layer.
+- Drop entries not updated for `N` minutes to reduce stale candidates.
+- This further lowers wasted joins on dead endpoint IDs after hotspot churn.
+
+## iroh documentation reviewed
+
+- Quickstart (endpoint + ticket flow):
+  - https://docs.iroh.computer/quickstart
+- Endpoint concepts and address freshness:
+  - https://docs.iroh.computer/concepts/endpoints
+- Discovery model (DNS/Pkarr/default behavior):
+  - https://docs.iroh.computer/concepts/discovery
+- DNS discovery guide:
+  - https://docs.iroh.computer/connecting/dns-discovery
+- DHT discovery option (opt-in):
+  - https://docs.iroh.computer/connecting/dht-discovery
+- Local discovery (mDNS, opt-in):
+  - https://docs.iroh.computer/connecting/local-discovery
+- Dedicated relay/discovery infrastructure guidance:
+  - https://docs.iroh.computer/deployment/dedicated-infrastructure

@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
-iroh = "*"
+iroh = { version = "*", features = ["address-lookup-pkarr-dht"] }
 iroh-gossip = "*"
 iroh-ping = "*"
 iroh-tickets = "*"

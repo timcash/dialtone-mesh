@@ -13,10 +13,53 @@ if [ -z "$NIX_BIN" ] || [ ! -x "$NIX_BIN" ]; then
   exit 1
 fi
 
-"$NIX_BIN" --extra-experimental-features "nix-command flakes" build .#mesh-v3
+TARGET="native"
+REBUILD=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rebuild)
+      REBUILD=1
+      ;;
+    --target)
+      shift
+      TARGET="${1:-}"
+      ;;
+    native|rover)
+      TARGET="$1"
+      ;;
+    *)
+      echo "usage: ./build.sh [--rebuild] [--target native|rover]" >&2
+      exit 1
+      ;;
+  esac
+  shift || true
+done
 
-ARCH="$(uname -m)"
+case "$TARGET" in
+  native)
+    ATTR="mesh-v3"
+    OUT_LINK="$ROOT/.result-native"
+    ARCH="$(uname -m)"
+    BIN_OUT="$HOME/dialtone/bin/mesh-v3_${ARCH}"
+    ;;
+  rover)
+    ATTR="mesh-v3-rover"
+    OUT_LINK="$ROOT/.result-rover"
+    BIN_OUT="$HOME/dialtone/bin/mesh-v3_arm64"
+    ;;
+  *)
+    echo "invalid target: $TARGET (expected native|rover)" >&2
+    exit 1
+    ;;
+esac
+
+BUILD_ARGS=(--extra-experimental-features "nix-command flakes" build ".#${ATTR}" --out-link "$OUT_LINK")
+if [ "$REBUILD" -eq 1 ]; then
+  BUILD_ARGS+=(--rebuild)
+fi
+"$NIX_BIN" "${BUILD_ARGS[@]}"
+
 BIN_DIR="$HOME/dialtone/bin"
 mkdir -p "$BIN_DIR"
-ln -sf "$ROOT/result/bin/mesh-v3" "$BIN_DIR/mesh-v3_${ARCH}"
-echo "Built: $BIN_DIR/mesh-v3_${ARCH} -> $ROOT/result/bin/mesh-v3"
+ln -sf "$OUT_LINK/bin/mesh-v3" "$BIN_OUT"
+echo "Built ($TARGET): $BIN_OUT -> $OUT_LINK/bin/mesh-v3"

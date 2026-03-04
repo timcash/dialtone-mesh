@@ -68,8 +68,22 @@
     const putStatus = document.getElementById('put-status');
     const toDate = (ts) => new Date(ts * 1000).toISOString();
     const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const dedupeNodes = (nodes) => {
+      const map = new Map();
+      for (const n of (nodes || [])) {
+        const key = (n.node_id && String(n.node_id).trim())
+          ? `id:${n.node_id}`
+          : `node:${n.node || ''}`;
+        const prev = map.get(key);
+        if (!prev || Number(n.updated_at_unix || 0) >= Number(prev.updated_at_unix || 0)) {
+          map.set(key, n);
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => (a.node || '').localeCompare(b.node || ''));
+    };
 
     function render(nodes) {
+      nodes = dedupeNodes(nodes);
       body.innerHTML = '';
       if (!nodes || nodes.length === 0) {
         body.innerHTML = '<tr><td colspan="4" class="muted">no peers registered</td></tr>';
