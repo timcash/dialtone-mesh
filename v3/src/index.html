@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>mesh-v3 index</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; background: #0f172a; color: #e2e8f0; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+    button { background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 8px; }
+    thead th { text-align: left; border-bottom: 1px solid #334155; padding: 8px; }
+    tbody td { border-bottom: 1px solid #1f2937; padding: 8px; vertical-align: top; }
+    .col-node { width: 180px; }
+    .col-updated { width: 220px; }
+    .col-ticket { width: auto; }
+    .ticket {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.25;
+      color: #cbd5e1;
+    }
+    .muted { color: #94a3b8; }
+    .ok { color: #22c55e; }
+    .warn { color: #f59e0b; }
+    textarea { width: 100%; min-height: 120px; background: #111827; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 8px; }
+    code { background: #1e293b; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>mesh-v3 index</h1>
+  <div class="row">
+    <div>WebSocket: <span id="ws-state" class="warn">connecting...</span></div>
+    <button id="refresh">Refresh</button>
+  </div>
+  <div class="row muted">
+    GET peers: <code>/nodes</code> | PUT peers: <code>/nodes</code> | Register: <code>/register</code>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="col-node">node</th>
+        <th class="col-updated">updated</th>
+        <th class="col-ticket">ticket</th>
+      </tr>
+    </thead>
+    <tbody id="peer-body"></tbody>
+  </table>
+
+  <h3>PUT /nodes JSON</h3>
+  <p class="muted">Use this to replace the entire peer list.</p>
+  <textarea id="put-json">{"nodes":[]}</textarea>
+  <div class="row">
+    <button id="put-btn">PUT /nodes</button>
+    <span id="put-status" class="muted"></span>
+  </div>
+
+  <script>
+    const body = document.getElementById('peer-body');
+    const wsState = document.getElementById('ws-state');
+    const putJson = document.getElementById('put-json');
+    const putStatus = document.getElementById('put-status');
+    const toDate = (ts) => new Date(ts * 1000).toISOString();
+    const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    function render(nodes) {
+      body.innerHTML = '';
+      if (!nodes || nodes.length === 0) {
+        body.innerHTML = '<tr><td colspan="3" class="muted">no peers registered</td></tr>';
+        return;
+      }
+      for (const n of nodes) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escapeHtml(n.node)}</td><td class="muted">${escapeHtml(toDate(n.updated_at_unix))}</td><td class="ticket">${escapeHtml(n.ticket)}</td>`;
+        body.appendChild(tr);
+      }
+      putJson.value = JSON.stringify({ nodes: nodes.map(n => ({ node: n.node, ticket: n.ticket })) }, null, 2);
+    }
+
+    async function refresh() {
+      const res = await fetch('/nodes');
+      if (!res.ok) return;
+      const data = await res.json();
+      render(data.nodes || []);
+    }
+
+    async function putNodes() {
+      putStatus.textContent = 'sending...';
+      try {
+        const payload = JSON.parse(putJson.value);
+        const res = await fetch('/nodes', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const txt = await res.text();
+        if (!res.ok) throw new Error(txt || ('HTTP ' + res.status));
+        const data = JSON.parse(txt);
+        render(data.nodes || []);
+        putStatus.textContent = 'ok';
+      } catch (e) {
+        putStatus.textContent = 'error: ' + e.message;
+      }
+    }
+
+    function connectWs() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.onopen = () => { wsState.textContent = 'connected'; wsState.className = 'ok'; };
+      ws.onclose = () => { wsState.textContent = 'disconnected'; wsState.className = 'warn'; setTimeout(connectWs, 1000); };
+      ws.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          render(data.nodes || []);
+        } catch (_) {}
+      };
+    }
+
+    document.getElementById('refresh').onclick = refresh;
+    document.getElementById('put-btn').onclick = putNodes;
+    refresh();
+    connectWs();
+  </script>
+</body>
+</html>
