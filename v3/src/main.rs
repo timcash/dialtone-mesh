@@ -26,6 +26,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Clone)]
 struct IndexState {
@@ -95,17 +96,17 @@ const GOSSIP_TOPIC: TopicId = TopicId::from_bytes(*b"mesh-v3-index-dialtone-hear
 
 const INDEX_HTML: &str = include_str!("index.html");
 
-macro_rules! logts {
-    ($($arg:tt)*) => {{
-        eprintln!("[{}] {}", now_unix(), format!($($arg)*));
-    }};
-}
-
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn iso_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn parse_ticket(s: &str) -> Result<EndpointTicket> {
@@ -224,6 +225,17 @@ fn cache_entries(cache: &Arc<Mutex<HashMap<String, Entry>>>) -> Vec<Entry> {
     Vec::new()
 }
 
+fn known_peer_count(cache: &Arc<Mutex<HashMap<String, Entry>>>, self_id: &str) -> usize {
+    cache_entries(cache)
+        .into_iter()
+        .filter(|e| e.node_id != self_id)
+        .count()
+}
+
+fn log_peer_count(host: &str, cache: &Arc<Mutex<HashMap<String, Entry>>>, self_id: &str) {
+    eprintln!("{} {} {}", iso_now(), host, known_peer_count(cache, self_id));
+}
+
 fn entries_to_peer_ids(entries: &[Entry], self_id: EndpointId) -> Vec<EndpointId> {
     let mut out = Vec::new();
     for entry in entries.iter().cloned().filter_map(normalize_entry) {
@@ -242,8 +254,7 @@ async fn fetch_nodes_with_retry(index_url: &str) -> Option<Vec<Entry>> {
     for attempt in 0..3 {
         match fetch_nodes(index_url).await {
             Ok(nodes) => return Some(nodes),
-            Err(err) => {
-                logts!("gossip list fetch failed (attempt={}): {}", attempt + 1, err);
+            Err(_) => {
                 if attempt < 2 {
                     sleep(Duration::from_secs(retry_delay_secs(attempt))).await;
                 }
@@ -281,30 +292,23 @@ fn spawn_auto_register(
                     match resp.json::<RegisterResponse>().await {
                         Ok(body) => {
                             merge_entries(&peer_cache, &body.nodes);
-                            logts!(
-                                "auto-register ok node={} index={} peers={}",
-                                node,
-                                index_url,
-                                body.nodes.len()
-                            );
+                            log_peer_count(&node, &peer_cache, &node_id);
                         }
                         Err(err) => {
-                            logts!("auto-register parse error node={} err={}", node, err);
+                            let _ = err;
+                            log_peer_count(&node, &peer_cache, &node_id);
                         }
                     }
                     failure_attempt = 0;
                 }
                 Ok(resp) => {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    logts!(
-                        "auto-register failed node={} status={} body={}",
-                        node, status, body
-                    );
+                    let _ = resp;
+                    log_peer_count(&node, &peer_cache, &node_id);
                     failure_attempt = failure_attempt.saturating_add(1);
                 }
                 Err(err) => {
-                    logts!("auto-register error node={} err={}", node, err);
+                    let _ = err;
+                    log_peer_count(&node, &peer_cache, &node_id);
                     failure_attempt = failure_attempt.saturating_add(1);
                 }
             }
@@ -380,13 +384,7 @@ async fn run_node() -> Result<()> {
             updated_at_unix: now_unix(),
         }],
     );
-    logts!("node id: {}", addr.id);
-    for ip in addr.ip_addrs() {
-        logts!("node ip: {ip}");
-    }
-    for relay in addr.relay_urls() {
-        logts!("node relay: {relay}");
-    }
+    log_peer_count(&node_name, &peer_cache, &addr.id.to_string());
     println!("{ticket}");
 
     if auto_register_enabled() {
@@ -411,11 +409,12 @@ async fn run_node() -> Result<()> {
     let (gossip_sender, mut gossip_receiver) = gossip.subscribe(GOSSIP_TOPIC, initial_peers).await?.split();
 
     let receiver_cache = peer_cache.clone();
+    let receiver_host = node_name.clone();
+    let receiver_self_id = addr.id.to_string();
     tokio::spawn(async move {
         while let Some(event) = gossip_receiver.next().await {
             match event {
                 Ok(GossipEvent::Received(msg)) => {
-                    let text = String::from_utf8_lossy(&msg.content);
                     if let Ok(heartbeat) = serde_json::from_slice::<GossipHeartbeat>(&msg.content) {
                         if !heartbeat.peers.is_empty() {
                             let hinted: Vec<Entry> = heartbeat
@@ -430,17 +429,11 @@ async fn run_node() -> Result<()> {
                                 .collect();
                             merge_entries(&receiver_cache, &hinted);
                         }
-                        logts!(
-                            "gossip heartbeat from={} endpoint_id={} unix={} peers={}",
-                            heartbeat.node, heartbeat.endpoint_id, heartbeat.unix, heartbeat.peers.len()
-                        );
-                    } else {
-                        logts!("gossip received: {}", text);
+                        log_peer_count(&receiver_host, &receiver_cache, &receiver_self_id);
                     }
                 }
                 Ok(_) => {}
-                Err(err) => {
-                    logts!("gossip receive error: {}", err);
+                Err(_) => {
                     break;
                 }
             }
@@ -460,9 +453,7 @@ async fn run_node() -> Result<()> {
             let entries = cache_entries(&heartbeat_cache);
             let peer_ids = entries_to_peer_ids(&entries, addr.id);
             if !peer_ids.is_empty() {
-                if let Err(err) = gossip_sender.join_peers(peer_ids).await {
-                    logts!("gossip join_peers error: {}", err);
-                }
+                let _ = gossip_sender.join_peers(peer_ids).await;
             }
 
             let peer_hints: Vec<PeerHint> = entries
@@ -485,12 +476,11 @@ async fn run_node() -> Result<()> {
             };
             match serde_json::to_vec(&heartbeat) {
                 Ok(payload) => {
-                    if let Err(err) = gossip_sender.broadcast(payload.into()).await {
-                        logts!("gossip broadcast error: {}", err);
-                    }
+                    let _ = gossip_sender.broadcast(payload.into()).await;
                 }
-                Err(err) => logts!("gossip heartbeat encode error: {}", err),
+                Err(_) => {}
             }
+            log_peer_count(&heartbeat_node, &heartbeat_cache, &heartbeat_id);
 
             sleep(Duration::from_secs(60)).await;
         }
@@ -513,13 +503,7 @@ async fn run_ping_to_ticket(ticket: EndpointTicket) -> Result<()> {
     let send_ep = Endpoint::bind().await?;
     send_ep.online().await;
     let local_addr = send_ep.addr();
-    logts!("node id: {}", local_addr.id);
-    for ip in local_addr.ip_addrs() {
-        logts!("node ip: {ip}");
-    }
-    for relay in local_addr.relay_urls() {
-        logts!("node relay: {relay}");
-    }
+    eprintln!("{} {} {}", iso_now(), local_addr.id, 0);
 
     let relay_only = env::var("MESH_V3_RELAY_ONLY").is_ok();
     let mut target_addr = ticket.endpoint_addr().clone();
@@ -528,7 +512,7 @@ async fn run_ping_to_ticket(ticket: EndpointTicket) -> Result<()> {
         if target_addr.addrs.is_empty() {
             return Err(anyhow!("relay-only mode enabled, but ticket has no relay address"));
         }
-        logts!("node mode: relay-only");
+        eprintln!("{} {} {}", iso_now(), local_addr.id, 0);
     }
 
     let send_pinger = Ping::new();
