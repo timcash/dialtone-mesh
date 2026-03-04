@@ -45,6 +45,7 @@
     <thead>
       <tr>
         <th class="col-node">node</th>
+        <th class="col-node">node_id</th>
         <th class="col-updated">updated</th>
         <th class="col-ticket">ticket</th>
       </tr>
@@ -71,15 +72,15 @@
     function render(nodes) {
       body.innerHTML = '';
       if (!nodes || nodes.length === 0) {
-        body.innerHTML = '<tr><td colspan="3" class="muted">no peers registered</td></tr>';
+        body.innerHTML = '<tr><td colspan="4" class="muted">no peers registered</td></tr>';
         return;
       }
       for (const n of nodes) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${escapeHtml(n.node)}</td><td class="muted">${escapeHtml(toDate(n.updated_at_unix))}</td><td class="ticket">${escapeHtml(n.ticket)}</td>`;
+        tr.innerHTML = `<td>${escapeHtml(n.node)}</td><td class="ticket">${escapeHtml(n.node_id || '')}</td><td class="muted">${escapeHtml(toDate(n.updated_at_unix))}</td><td class="ticket">${escapeHtml(n.ticket)}</td>`;
         body.appendChild(tr);
       }
-      putJson.value = JSON.stringify({ nodes: nodes.map(n => ({ node: n.node, ticket: n.ticket })) }, null, 2);
+      putJson.value = JSON.stringify({ nodes: nodes.map(n => ({ node: n.node, node_id: n.node_id, ticket: n.ticket })) }, null, 2);
     }
 
     async function refresh() {

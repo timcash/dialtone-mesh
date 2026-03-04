@@ -13,9 +13,7 @@ if [ -z "$NIX_BIN" ] || [ ! -x "$NIX_BIN" ]; then
   exit 1
 fi
 
-if [ "${1:-}" = "--rebuild" ] || [ ! -x "$ROOT/result/bin/mesh-v3" ]; then
-  "$NIX_BIN" --extra-experimental-features "nix-command flakes" build .#mesh-v3
-fi
+"$NIX_BIN" --extra-experimental-features "nix-command flakes" build .#mesh-v3
 
 ARCH="$(uname -m)"
 BIN_DIR="$HOME/dialtone/bin"
