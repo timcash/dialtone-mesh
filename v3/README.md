@@ -6,14 +6,14 @@ Minimal point-to-point ping between two machines using iroh tickets.
 
 ```bash
 cd ~/dialtone/src/mods/mesh/v3
-~/dialtone/dialtone.sh nix develop . -c cargo build
+~/dialtone/dialtone2.sh cargo build --release
 ```
 
 ## Run receiver (example: wsl)
 
 ```bash
 cd ~/dialtone/src/mods/mesh/v3
-~/dialtone/dialtone.sh nix develop . -c cargo run -- receiver
+~/dialtone/dialtone2.sh cargo run -- receiver
 ```
 
 This prints an `EndpointTicket` string.
@@ -22,7 +22,7 @@ This prints an `EndpointTicket` string.
 
 ```bash
 cd ~/dialtone/src/mods/mesh/v3
-~/dialtone/dialtone.sh nix develop . -c cargo run -- sender '<PASTE_TICKET_HERE>'
+~/dialtone/dialtone2.sh cargo run -- sender '<PASTE_TICKET_HERE>'
 ```
 
 If successful, sender prints round-trip latency.

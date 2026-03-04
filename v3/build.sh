@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$HOME/dialtone/src/mods/mesh/v3"
-"$HOME/dialtone/dialtone.sh" nix --extra-experimental-features 'nix-command flakes' develop "$ROOT" -c cargo build --release
+DIALTONE_RUNNER="$HOME/dialtone/dialtone2.sh"
+if [ ! -x "$DIALTONE_RUNNER" ]; then
+  DIALTONE_RUNNER="$HOME/dialtone/dialtone.sh"
+fi
+
+"$DIALTONE_RUNNER" cargo build --release
 
 ARCH="$(uname -m)"
 BIN_DIR="$HOME/dialtone/bin"

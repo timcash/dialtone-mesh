@@ -7,7 +7,14 @@
 
   outputs = { self, nixpkgs }:
     let
-      supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "armv7l-linux"
+        "armv6l-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
     in {
       devShells = forAllSystems (system:
@@ -18,9 +25,6 @@
             packages = with pkgs; [
               rustc
               cargo
-              pkg-config
-              clang
-              openssl
             ];
           };
         }
