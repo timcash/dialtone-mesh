@@ -11,28 +11,28 @@ Default mode is `node`.
 ## Build (native)
 
 ```bash
-cd ~/dialtone/src/mods/mesh/v3
-./build.sh --target native
+cd <repo-root>
+./dialtone2.sh mesh v3 build --target native
 ```
 
 This builds with nix and links:
 
-- `~/dialtone/bin/mesh-v3_$(uname -m)` -> native build
+- `<repo-root>/bin/mesh-v3_$(uname -m)` -> native build
 
-Use `./build.sh --rebuild` to force rebuild.
+Use `./dialtone2.sh mesh v3 build --rebuild` to force rebuild.
 
 ## Build rover target (from WSL)
 
 ```bash
-cd ~/dialtone/src/mods/mesh/v3
-./build.sh --target rover
+cd <repo-root>
+./dialtone2.sh mesh v3 build --target rover
 ```
 
 This produces an `aarch64-linux` build suitable for rover and links:
 
-- `~/dialtone/bin/mesh-v3_arm64` -> rover build
+- `<repo-root>/bin/mesh-v3_arm64` -> rover build
 
-`build.sh` uses separate nix out-links:
+This command uses separate nix out-links:
 
 - native: `.result-native`
 - rover: `.result-rover`
@@ -42,7 +42,7 @@ This avoids cross-build collisions with the generic `result` symlink.
 ## Run node
 
 ```bash
-~/dialtone/bin/mesh-v3_$(uname -m) \
+<repo-root>/bin/mesh-v3_$(uname -m) \
   --node gold \
   --index-url https://index.dialtone.earth \
   --dht \
@@ -52,13 +52,13 @@ This avoids cross-build collisions with the generic `result` symlink.
 ## Run index
 
 ```bash
-~/dialtone/bin/mesh-v3_$(uname -m) index 127.0.0.1:8787
+<repo-root>/bin/mesh-v3_$(uname -m) index 127.0.0.1:8787
 ```
 
 ## Run hub (index + node in one process)
 
 ```bash
-~/dialtone/bin/mesh-v3_$(uname -m) \
+<repo-root>/bin/mesh-v3_$(uname -m) \
   --node wsl \
   --index-url https://index.dialtone.earth \
   --dht \

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$HOME/dialtone/src/mods/mesh/v3"
-SSH_WRAPPER="$HOME/dialtone/dialtone.sh"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+BIN_DIR="$REPO_ROOT/bin"
+SSH_WRAPPER="$REPO_ROOT/dialtone.sh"
 
 ssh_gold() {
   "$SSH_WRAPPER" ssh gold "$@" 2>/dev/null
@@ -18,21 +21,21 @@ Usage:
 Notes:
 - local = current machine (WSL)
 - gold  = ssh host alias 'gold' in env/ssh_config
-- Requires built binaries in ~/dialtone/bin on both hosts.
+- Requires built binaries in <repo-root>/bin on both hosts.
 USAGE
 }
 
 need_bin_local() {
-  local bin="$HOME/dialtone/bin/mesh-v3_$(uname -m)"
+  local bin="$BIN_DIR/mesh-v3_$(uname -m)"
   if [ ! -x "$bin" ]; then
-    (cd "$ROOT" && ./build.sh >/dev/null)
+    (cd "$REPO_ROOT" && ./dialtone2.sh mesh v3 build >/dev/null)
   fi
   echo "$bin"
 }
 
 need_bin_gold() {
   local out
-  out="$(ssh_gold 'BIN=$HOME/dialtone/bin/mesh-v3_$(uname -m); if [ ! -x "$BIN" ]; then cd $HOME/dialtone/src/mods/mesh/v3 && ./build.sh >/dev/null; fi; echo "$BIN"')"
+  out="$(ssh_gold 'REPO_ROOT=$HOME/dialtone; BIN=$REPO_ROOT/bin/mesh-v3_$(uname -m); if [ ! -x "$BIN" ]; then cd $REPO_ROOT && ./dialtone2.sh mesh v3 build >/dev/null; fi; echo "$BIN"')"
   echo "$out" | grep '^/' | tail -n1
 }
 

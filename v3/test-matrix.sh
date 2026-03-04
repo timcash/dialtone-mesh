@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$HOME/dialtone/src/mods/mesh/v3"
-SSH_WRAPPER="$HOME/dialtone/dialtone.sh"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+BIN_DIR="$REPO_ROOT/bin"
+SSH_WRAPPER="$REPO_ROOT/dialtone.sh"
 
 ssh_gold() {
   "$SSH_WRAPPER" ssh gold "$@" 2>/dev/null
@@ -23,8 +26,8 @@ run_test() {
 }
 
 local_loopback() {
-  local bin="$HOME/dialtone/bin/mesh-v3_$(uname -m)"
-  [ -x "$bin" ] || (cd "$ROOT" && ./build.sh >/dev/null)
+  local bin="$BIN_DIR/mesh-v3_$(uname -m)"
+  [ -x "$bin" ] || (cd "$REPO_ROOT" && ./dialtone2.sh mesh v3 build >/dev/null)
 
   local log
   log="$(mktemp /tmp/meshv3-local-loop.XXXXXX.log)"
