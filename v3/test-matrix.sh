@@ -27,7 +27,7 @@ run_test() {
 
 local_loopback() {
   local bin="$BIN_DIR/mesh-v3_$(uname -m)"
-  [ -x "$bin" ] || (cd "$REPO_ROOT" && ./dialtone2.sh mesh v3 build >/dev/null)
+  [ -x "$bin" ] || (cd "$REPO_ROOT" && ./dialtone_mod mesh v3 build >/dev/null)
 
   local log
   log="$(mktemp /tmp/meshv3-local-loop.XXXXXX.log)"

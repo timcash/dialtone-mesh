@@ -12,20 +12,20 @@ Default mode is `node`.
 
 ```bash
 cd <repo-root>
-./dialtone2.sh mesh v3 build --target native
+./dialtone_mod mesh v3 build --target native
 ```
 
 This builds with nix and links:
 
 - `<repo-root>/bin/mesh-v3_$(uname -m)` -> native build
 
-Use `./dialtone2.sh mesh v3 build --rebuild` to force rebuild.
+Use `./dialtone_mod mesh v3 build --rebuild` to force rebuild.
 
 ## Build rover target (from WSL)
 
 ```bash
 cd <repo-root>
-./dialtone2.sh mesh v3 build --target rover
+./dialtone_mod mesh v3 build --target rover
 ```
 
 This produces an `aarch64-linux` build suitable for rover and links:

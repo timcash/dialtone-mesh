@@ -28,14 +28,14 @@ USAGE
 need_bin_local() {
   local bin="$BIN_DIR/mesh-v3_$(uname -m)"
   if [ ! -x "$bin" ]; then
-    (cd "$REPO_ROOT" && ./dialtone2.sh mesh v3 build >/dev/null)
+    (cd "$REPO_ROOT" && ./dialtone_mod mesh v3 build >/dev/null)
   fi
   echo "$bin"
 }
 
 need_bin_gold() {
   local out
-  out="$(ssh_gold 'REPO_ROOT=$HOME/dialtone; BIN=$REPO_ROOT/bin/mesh-v3_$(uname -m); if [ ! -x "$BIN" ]; then cd $REPO_ROOT && ./dialtone2.sh mesh v3 build >/dev/null; fi; echo "$BIN"')"
+  out="$(ssh_gold 'REPO_ROOT=$HOME/dialtone; BIN=$REPO_ROOT/bin/mesh-v3_$(uname -m); if [ ! -x "$BIN" ]; then cd $REPO_ROOT && ./dialtone_mod mesh v3 build >/dev/null; fi; echo "$BIN"')"
   echo "$out" | grep '^/' | tail -n1
 }
 
