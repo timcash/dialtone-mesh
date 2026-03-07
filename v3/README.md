@@ -45,14 +45,13 @@ This avoids cross-build collisions with the generic `result` symlink.
 <repo-root>/bin/mesh-v3_$(uname -m) \
   --node gold \
   --index-url https://index.dialtone.earth \
-  --dht \
   node
 ```
 
 ## Run index
 
 ```bash
-<repo-root>/bin/mesh-v3_$(uname -m) index 127.0.0.1:8787
+<repo-root>/bin/mesh-v3_$(uname -m) index 0.0.0.0:8787
 ```
 
 ## Run hub (index + node in one process)
@@ -61,21 +60,31 @@ This avoids cross-build collisions with the generic `result` symlink.
 <repo-root>/bin/mesh-v3_$(uname -m) \
   --node wsl \
   --index-url https://index.dialtone.earth \
-  --dht \
-  hub 127.0.0.1:8787
+  hub 0.0.0.0:8787
 ```
 
 ### Runtime flags
 
 - `--node <name>`
 - `--index-url <url>`
-- `--gossip-interval <secs>`
-- `--register-interval <secs>`
+- `--gossip-interval <secs>`: minimum `10`, default `60`
+- `--register-interval <secs>`: minimum `5`, default `30`
 - `--peer-cache <path>`
 - `--no-auto-register`
 - `--dht` / `--no-dht`
 - `--dns` / `--no-dns`
 - `--relay-only`
+
+Discovery defaults in code:
+- DHT enabled
+- DNS enabled
+- relay mode = `default`
+
+Important flag behavior:
+- `--dht` also sets `prefer_dht=on` and disables DNS for that run
+- `--no-dht` disables DHT only
+- `--dns` and `--no-dns` explicitly control DNS discovery
+- `--relay-only` only affects dialing behavior in `connect`/ping paths; endpoint bind still uses relay mode `default`
 
 ## APIs
 
@@ -83,8 +92,13 @@ This avoids cross-build collisions with the generic `result` symlink.
 - `GET /nodes`
 - `PUT /nodes`
 - `POST /register`
-- `GET /ticket/:node`
+- `GET /ticket/:node_id`
 - `GET /ws` (live peer updates)
+
+Notes:
+- index stores entries keyed by `node_id`
+- `POST /register` removes older entries for the same human `node` name before inserting the fresh record
+- CLI `connect <index_url> <node>` currently passes that second argument directly to `/ticket/<arg>`, so the practical lookup key is `node_id`, not display name
 
 ## Hotspot gossip debugging log (March 4, 2026)
 
@@ -103,14 +117,14 @@ What was tried to get `rover-1` gossip stable while on phone hotspot `tim`:
 3. Added resilience in `mesh-v3` code
 - Gossip heartbeats now include peer hints (`node`, `node_id`, `ticket`, `updated_at_unix`).
 - Node merges hinted peers into local cache and uses cache when index fetch fails.
-- Added timestamped logs (`[unix_ts] ...`) for all key gossip/register events.
+- Added timestamped RFC3339 logs for key gossip/register/lookup events.
 - Added register retry/backoff and configurable success interval (`MESH_V3_REGISTER_INTERVAL_SECS`, default `30`).
 - Added compatibility for older index responses:
   - `RegisterResponse.nodes` is optional (`#[serde(default)]`).
   - `Entry.node_id` is optional on decode (`#[serde(default)]`) and derived from ticket if missing.
 - Added persistent peer cache on disk:
   - default path: `~/dialtone/tmp/mesh-v3-peer-cache.json`
-  - loaded on startup and refreshed periodically.
+  - loaded on startup and refreshed every `30s`.
 
 4. Deployed updated rover binary
 - Built rover target from `v3` flake (`.#mesh-v3-rover`) and copied to:
@@ -169,7 +183,7 @@ Based on iroh endpoint/ticket/relay behavior in the docs:
 - This prevents `gold`/`wsl`/`rover` duplicate IDs from inflating peer counts.
 
 2. Keep index registration frequent, gossip slightly slower.
-- Use fast register (`30s`) so fresh tickets are always available.
+- Default register interval is `30s`, minimum `5s`.
 - Use configurable heartbeat interval:
   - `MESH_V3_GOSSIP_INTERVAL_SECS` (default `60`, min `10`).
 - On hotspot, setting `30` can improve observed liveness.
@@ -177,7 +191,8 @@ Based on iroh endpoint/ticket/relay behavior in the docs:
 3. Keep relay path available as fallback.
 - Hotspot NAT can block direct UDP holepunch at times.
 - iroh relay-backed connectivity is the fallback when direct path fails.
-- Ensure relay URLs are present in endpoint addresses and do not disable relay mode for hotspot nodes.
+- Code binds endpoints with `RelayMode::Default`.
+- Avoid `--relay-only` unless you intentionally want relay-only dialing for diagnostics.
 
 4. Persist peer cache across restarts.
 - Already implemented (`~/dialtone/tmp/mesh-v3-peer-cache.json`).
