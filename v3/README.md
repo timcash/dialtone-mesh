@@ -222,3 +222,30 @@ Based on iroh endpoint/ticket/relay behavior in the docs:
   - https://docs.iroh.computer/connecting/local-discovery
 - Dedicated relay/discovery infrastructure guidance:
   - https://docs.iroh.computer/deployment/dedicated-infrastructure
+
+## Quick Start
+
+```sh
+# Show the mesh command surface from the sqlite-managed mods system.
+./dialtone_mod mesh v3 help
+
+# This mod has no Go package entrypoint recorded in sqlite yet.
+# Inspect it through the central registry before adding tests.
+./dialtone_mod mods v1 db topo
+./dialtone_mod mods v1 db graph --format text
+```
+
+## Test Results
+
+- Timestamp: 2026-03-22
+- Command:
+
+```sh
+./dialtone_mod shell v1 test-all --wait-seconds 240
+```
+
+- Visible result:
+
+```text
+ok  	dialtone/dev/mods/mesh/v3
+```
