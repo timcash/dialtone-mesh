@@ -1,0 +1,16 @@
+{
+  "name": "mesh",
+  "version": "v3",
+  "depends_on": [],
+  "env_vars": [
+    { "name": "DIALTONE_REPO_ROOT", "required": true },
+    { "name": "DIALTONE_STATE_DB", "required": false },
+    { "name": "DIALTONE_USE_NIX", "required": true }
+  ],
+  "testing": {
+    "requires_nix": true,
+    "serial_group": "network",
+    "visible_tmux": false
+  }
+}
+

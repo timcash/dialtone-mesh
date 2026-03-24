@@ -12,8 +12,11 @@ func TestMeshV3LayoutAndCargoDeps(t *testing.T) {
 	root := currentDir(t)
 	for _, rel := range []string{
 		"README.md",
+		"mod.json",
 		"Cargo.toml",
 		filepath.Join("src", "main.rs"),
+		filepath.Join("cli", "main.go"),
+		filepath.Join("cli", "main_test.go"),
 	} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
 			t.Fatalf("expected %s in mesh/v3: %v", rel, err)
